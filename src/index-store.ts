@@ -298,7 +298,10 @@ export class IndexStore {
             try {
               const vectors = await this.engine.embedBatch(
                 toEmbed.map((t) => t.text),
-                "passage",
+                // Symmetric "query:" prefix on BOTH sides for note-to-note
+                // similarity — e5's own guidance for non-retrieval tasks. (No-op
+                // for prefix-free paraphrase models.)
+                "query",
                 onProgress,
               );
               for (let j = 0; j < toEmbed.length; j++) {
@@ -387,7 +390,7 @@ export class IndexStore {
     const text = await this.readEmbedText(file);
     if (!text) return null;
     try {
-      return await this.engine.embed(text, "passage", onProgress);
+      return await this.engine.embed(text, "query", onProgress);
     } catch (e) {
       console.warn(`[related-notes] failed to embed ${file.path}`, e);
       return null;

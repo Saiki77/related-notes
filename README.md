@@ -55,8 +55,10 @@ restarts and only changed notes are re-embedded.
 - **Performance profile** — one-click presets. **Balanced** is lighter and faster;
   **Best quality** uses a larger model and more context for the strongest matches.
 - **Model** — the embedding model (a dropdown of vetted choices, or paste a custom
-  Hugging Face id). The default `multilingual-e5-small` gives the best German +
-  English quality at a small size.
+  Hugging Face id). The default `paraphrase-multilingual-MiniLM-L12-v2` is a
+  symmetric sentence-similarity model — the right tool for ranking how alike two
+  notes are. `paraphrase-multilingual-mpnet-base-v2` (Best quality) is stronger but
+  larger. e5 models are retrieval-oriented and rank note similarity less well.
 - **Compute device** — **Auto** (WebGPU when available, else WASM), **WebGPU**, or
   **WASM**.
 - **Number of results** — how many cards to show.

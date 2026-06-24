@@ -37,7 +37,10 @@ export interface RelatedNotesSettings {
 }
 
 export const DEFAULT_SETTINGS: RelatedNotesSettings = {
-  modelId: "Xenova/multilingual-e5-small",
+  // A SYMMETRIC sentence-similarity model — the right tool for "which notes are
+  // alike". (multilingual-e5-* are RETRIEVAL models, tuned for short-query →
+  // document search, and rank note-to-note similarity poorly.)
+  modelId: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
   device: "auto",
   topK: 12,
   minSimilarity: 0.3,
@@ -48,12 +51,15 @@ export const DEFAULT_SETTINGS: RelatedNotesSettings = {
 
 // A few vetted model ids surfaced as a dropdown so users don't have to memorise
 // HF repo paths. Any other id can still be typed in the text field below.
+// Paraphrase (symmetric) models first — they judge note-to-note similarity far
+// better than retrieval models for this use case.
 const MODEL_OPTIONS: Record<string, string> = {
-  "Xenova/multilingual-e5-small": "multilingual-e5-small (fast, DE+EN, needs prefix)",
   "Xenova/paraphrase-multilingual-MiniLM-L12-v2":
-    "paraphrase-multilingual-MiniLM-L12-v2 (no prefix)",
+    "MiniLM-L12 multilingual — best for related notes, fast (default)",
   "Xenova/paraphrase-multilingual-mpnet-base-v2":
-    "paraphrase-multilingual-mpnet-base-v2 (best quality, larger)",
+    "mpnet-base multilingual — strongest matches, larger & slower",
+  "Xenova/multilingual-e5-small":
+    "e5-small — retrieval/search model, weaker for note similarity",
 };
 
 // One-click presets. "Balanced" is light and fast; "Best quality" uses a larger
@@ -62,10 +68,10 @@ const MODEL_OPTIONS: Record<string, string> = {
 type ProfileName = "balanced" | "best";
 const PROFILES: Record<ProfileName, Partial<RelatedNotesSettings>> = {
   balanced: {
-    modelId: "Xenova/multilingual-e5-small",
+    modelId: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
     device: "auto",
     topK: 8,
-    minSimilarity: 0.4,
+    minSimilarity: 0.3,
     embedCharLimit: 1200,
     showSnippet: true,
   },
@@ -415,7 +421,7 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Model")
       .setDesc(
-        "The embedding model. multilingual-e5-small gives the best German + English quality. Weights download once and are cached (~110 MB for the quantized WASM build; larger for the fp32 build WebGPU uses).",
+        "The embedding model. Paraphrase (symmetric) models judge note-to-note similarity best — MiniLM-L12 (default) is fast; mpnet-base is the strongest. e5 is a retrieval model and ranks similarity poorly here. Weights download once and are cached; changing the model rebuilds the index.",
       )
       .addDropdown((d) => {
         for (const [id, label] of Object.entries(MODEL_OPTIONS)) d.addOption(id, label);
