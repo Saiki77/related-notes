@@ -125,6 +125,42 @@
   background-color: var(--background-modifier-border);
 }
 
+/* === Why-related + connection pills ========================================= */
+.related-notes-view .rn-pills {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--size-2-2);
+  margin-top: var(--size-2-2);
+}
+
+/* Connection type: graph-connected ("Linked") vs discovered-by-meaning ("Related"). */
+.related-notes-view .rn-conn {
+  font-size: var(--font-ui-smaller);
+  font-weight: var(--font-medium);
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  background-color: var(--background-modifier-border);
+}
+
+.related-notes-view .rn-conn-linked {
+  color: var(--text-on-accent);
+  background-color: var(--interactive-accent);
+}
+
+/* Why-related reason (top shared tag, "Co-cited", "Same folder", "Similar text"). */
+.related-notes-view .rn-why {
+  font-size: var(--font-ui-smaller);
+  line-height: 1;
+  padding: 2px 6px;
+  border-radius: var(--radius-s);
+  color: var(--text-accent);
+  background-color: var(--background-secondary-alt);
+  border: 1px solid var(--background-modifier-border);
+}
+
 /* === Path + snippet ========================================================= */
 .related-notes-view .rn-path {
   margin-top: var(--size-2-1);
@@ -144,6 +180,14 @@
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Muted last-edited line. */
+.related-notes-view .rn-recency {
+  margin-top: var(--size-2-1);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
 }
 
 /* === Empty / placeholder ==================================================== */

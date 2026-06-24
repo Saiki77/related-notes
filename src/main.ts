@@ -34,6 +34,13 @@ export interface RelatedNotesSettings {
   embedCharLimit: number;
   excludeFolders: string; // comma- or newline-separated folder paths
   showSnippet: boolean;
+  // --- multi-vector / ranking ---
+  chunking: boolean; // master toggle for the chunk-level path
+  structureInfluence: number; // B_MAX for the hybrid structural boost (0..0.3)
+  showSummary: boolean; // centroid-sentence line (supersedes snippet when on)
+  showRecency: boolean; // muted "edited Nd ago" line
+  maxChunks: number; // body-chunk cap (advanced)
+  shortlistSize: number; // Stage-1 -> Stage-2 funnel width (advanced)
 }
 
 export const DEFAULT_SETTINGS: RelatedNotesSettings = {
@@ -43,10 +50,18 @@ export const DEFAULT_SETTINGS: RelatedNotesSettings = {
   modelId: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
   device: "auto",
   topK: 12,
-  minSimilarity: 0.3,
+  // Chunk-level BiMax scores land in a higher, less-spread range than the old
+  // whole-note centroid cosines, so the floor is re-centered up from 0.3.
+  minSimilarity: 0.45,
   embedCharLimit: 1500,
   excludeFolders: "",
   showSnippet: true,
+  chunking: true,
+  structureInfluence: 0.15,
+  showSummary: true,
+  showRecency: false,
+  maxChunks: 16,
+  shortlistSize: 60,
 };
 
 // A few vetted model ids surfaced as a dropdown so users don't have to memorise
@@ -71,17 +86,25 @@ const PROFILES: Record<ProfileName, Partial<RelatedNotesSettings>> = {
     modelId: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
     device: "auto",
     topK: 8,
-    minSimilarity: 0.3,
+    minSimilarity: 0.45,
     embedCharLimit: 1200,
     showSnippet: true,
+    chunking: true,
+    showSummary: true,
+    structureInfluence: 0.15,
+    maxChunks: 16,
   },
   best: {
     modelId: "Xenova/paraphrase-multilingual-mpnet-base-v2",
     device: "auto",
     topK: 20,
-    minSimilarity: 0.2,
+    minSimilarity: 0.35,
     embedCharLimit: 3500,
     showSnippet: true,
+    chunking: true,
+    showSummary: true,
+    structureInfluence: 0.2,
+    maxChunks: 20,
   },
 };
 
@@ -105,6 +128,12 @@ export default class RelatedNotesPlugin extends Plugin {
   // equal the "auto" preference and would rebuild on every unrelated save.
   private appliedModelId!: string;
   private appliedDevicePref!: DevicePref;
+  // The embedding-shape settings the current index was built for. Changing any of
+  // them alters WHAT is embedded per note, so they trigger a rebuild like a model
+  // change. (showSummary also changes whether chunk text is persisted.)
+  private appliedChunking!: boolean;
+  private appliedMaxChunks!: number;
+  private appliedShowSummary!: boolean;
   // Guards the engine-swap + rebuild path against re-entrancy.
   private swapping = false;
 
@@ -126,6 +155,9 @@ export default class RelatedNotesPlugin extends Plugin {
     this.engine = new EmbeddingEngine(this.settings.modelId, this.settings.device);
     this.appliedModelId = this.settings.modelId;
     this.appliedDevicePref = this.settings.device;
+    this.appliedChunking = this.settings.chunking;
+    this.appliedMaxChunks = this.settings.maxChunks;
+    this.appliedShowSummary = this.settings.showSummary;
     this.store = new IndexStore(
       this.app,
       this.engine,
@@ -329,6 +361,11 @@ export default class RelatedNotesPlugin extends Plugin {
       excludeFolders: this.parseExcludeFolders(),
       topK: this.settings.topK,
       minSimilarity: this.settings.minSimilarity,
+      chunking: this.settings.chunking,
+      structureInfluence: this.settings.structureInfluence,
+      maxChunks: this.settings.maxChunks,
+      shortlistSize: this.settings.shortlistSize,
+      showSummary: this.settings.showSummary,
     };
   }
 
@@ -349,6 +386,13 @@ export default class RelatedNotesPlugin extends Plugin {
     // preference — the bug that made every slider drag rebuild the vault).
     const modelChanged = this.appliedModelId !== this.settings.modelId;
     const deviceChanged = this.appliedDevicePref !== this.settings.device;
+    // Embedding-SHAPE changes alter WHAT is embedded (chunking on/off, the chunk
+    // cap) or whether chunk text is persisted (showSummary), so they too need a
+    // full re-embed — but they keep the SAME engine.
+    const shapeChanged =
+      this.appliedChunking !== this.settings.chunking ||
+      this.appliedMaxChunks !== this.settings.maxChunks ||
+      this.appliedShowSummary !== this.settings.showSummary;
 
     if ((modelChanged || deviceChanged) && !this.swapping) {
       this.swapping = true;
@@ -359,11 +403,27 @@ export default class RelatedNotesPlugin extends Plugin {
         );
         this.appliedModelId = this.settings.modelId;
         this.appliedDevicePref = this.settings.device;
+        this.appliedChunking = this.settings.chunking;
+        this.appliedMaxChunks = this.settings.maxChunks;
+        this.appliedShowSummary = this.settings.showSummary;
         // Swap the engine IN PLACE: the store (and the view's progress
         // subscription) stay valid, so the rebuild's status line stays live.
         this.store.setEngine(this.engine);
         new Notice("Related notes: model changed, rebuilding index…");
         await this.store.build();
+      } finally {
+        this.swapping = false;
+      }
+    } else if (shapeChanged && !this.swapping) {
+      this.swapping = true;
+      try {
+        this.appliedChunking = this.settings.chunking;
+        this.appliedMaxChunks = this.settings.maxChunks;
+        this.appliedShowSummary = this.settings.showSummary;
+        new Notice("Related notes: chunking settings changed, rebuilding index…");
+        // Same engine, but force a full re-embed so every note's chunk set matches
+        // the new shape.
+        await this.store.build(undefined, true);
       } finally {
         this.swapping = false;
       }
@@ -477,7 +537,7 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
       const setting = new Setting(containerEl)
         .setName("Minimum similarity")
         .setDesc(
-          "Hide notes below this cosine similarity (0–1). Lower shows more, looser matches; higher shows only close matches.",
+          "Hide notes below this similarity (0–1). Chunk-level matching scores higher and tighter than before, so the default floor moved up — around 0.45 is a good starting point. Lower shows more, looser matches.",
         );
       const fmt = (v: number) => v.toFixed(2);
       const valueEl = setting.controlEl.createSpan({
@@ -500,7 +560,7 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
       const setting = new Setting(containerEl)
         .setName("Embed character limit")
         .setDesc(
-          "How many characters of each note's body to embed (after the title). More context is more accurate but slower to index.",
+          "Total characters of each note's body considered for chunking. More context is more accurate but slower to index.",
         );
       const valueEl = setting.controlEl.createSpan({
         cls: "related-notes-slider-value",
@@ -534,14 +594,117 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
       );
 
     new Setting(containerEl)
+      .setName("Show summary line")
+      .setDesc(
+        "Show the note's most representative sentence on each card (computed locally from its own chunks — no extra model). Falls back to a plain preview when off. Toggling this rebuilds the index so the summary text is available.",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.showSummary).onChange(async (v) => {
+          this.plugin.settings.showSummary = v;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    new Setting(containerEl)
       .setName("Show snippet")
-      .setDesc("Show a one- to two-line text preview on each card.")
+      .setDesc(
+        "Show a one- to two-line text preview on each card. Used as the fallback when the summary line is off.",
+      )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.showSnippet).onChange(async (v) => {
           this.plugin.settings.showSnippet = v;
           await this.plugin.saveSettings();
         }),
       );
+
+    new Setting(containerEl)
+      .setName("Show last-edited time")
+      .setDesc("Add a muted “edited Nd ago” line to each card.")
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.showRecency).onChange(async (v) => {
+          this.plugin.settings.showRecency = v;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    {
+      const setting = new Setting(containerEl)
+        .setName("Structure influence")
+        .setDesc(
+          "How much shared tags, links, and folders nudge the ranking. Bounded so it only re-orders near-ties and never promotes an unrelated note. 0 disables it.",
+        );
+      const fmt = (v: number) => v.toFixed(2);
+      const valueEl = setting.controlEl.createSpan({
+        cls: "related-notes-slider-value",
+        text: fmt(this.plugin.settings.structureInfluence),
+      });
+      setting.addSlider((s) =>
+        s
+          .setLimits(0, 0.3, 0.01)
+          .setValue(this.plugin.settings.structureInfluence)
+          .onChange((v) => {
+            this.plugin.settings.structureInfluence = v;
+            valueEl.setText(fmt(v));
+            this.debouncedSave();
+          }),
+      );
+    }
+
+    new Setting(containerEl)
+      .setName("Chunk-level matching")
+      .setDesc(
+        "Embed each note as several sentence-level chunks instead of one whole-note vector — far more accurate for long notes. Turning this off reverts to single-vector matching. Changing it rebuilds the index.",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.chunking).onChange(async (v) => {
+          this.plugin.settings.chunking = v;
+          await this.plugin.saveSettings();
+        }),
+      );
+
+    {
+      const setting = new Setting(containerEl)
+        .setName("Max chunks per note")
+        .setDesc(
+          "Advanced. Cap on sentence-window chunks embedded per note (the title is extra). Higher captures more of long notes but grows the index and slows ranking. Changing it rebuilds the index.",
+        );
+      const valueEl = setting.controlEl.createSpan({
+        cls: "related-notes-slider-value",
+        text: String(this.plugin.settings.maxChunks),
+      });
+      setting.addSlider((s) =>
+        s
+          .setLimits(4, 32, 1)
+          .setValue(this.plugin.settings.maxChunks)
+          .onChange((v) => {
+            this.plugin.settings.maxChunks = v;
+            valueEl.setText(String(v));
+            this.debouncedSave();
+          }),
+      );
+    }
+
+    {
+      const setting = new Setting(containerEl)
+        .setName("Shortlist size")
+        .setDesc(
+          "Advanced. How many coarse candidates are re-ranked with the precise chunk comparison on each note switch. Higher is slightly more thorough but slower (kept at least 4× the result count).",
+        );
+      const valueEl = setting.controlEl.createSpan({
+        cls: "related-notes-slider-value",
+        text: String(this.plugin.settings.shortlistSize),
+      });
+      setting.addSlider((s) =>
+        s
+          .setLimits(20, 150, 10)
+          .setValue(this.plugin.settings.shortlistSize)
+          .onChange((v) => {
+            this.plugin.settings.shortlistSize = v;
+            valueEl.setText(String(v));
+            this.debouncedSave();
+          }),
+      );
+    }
 
     // --- index status + manual rebuild ---------------------------------------
     const progress = this.plugin.store.getProgress();

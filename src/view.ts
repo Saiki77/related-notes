@@ -6,7 +6,11 @@ import {
   type Debouncer,
 } from "obsidian";
 import type RelatedNotesPlugin from "./main";
-import type { IndexProgress, RankedNote } from "./index-store";
+import type {
+  IndexProgress,
+  RankedNote,
+  WhyReason,
+} from "./index-store";
 
 export const VIEW_TYPE_RELATED = "related-notes";
 
@@ -151,20 +155,85 @@ export class RelatedNotesView extends ItemView {
     pill.setText(`${item.approximate ? "~" : ""}${pct}%`);
     if (item.approximate) pill.addClass("rn-score-approx");
 
+    // Why-related + connection pills, derived from the structural signals that
+    // fired. keywordRank results carry no reason/connection — render no pill rather
+    // than a wrong one.
+    if (item.reason || item.connection) {
+      const pills = card.createDiv({ cls: "rn-pills" });
+      if (item.connection === "linked") {
+        pills.createSpan({ cls: "rn-conn rn-conn-linked", text: "Linked" });
+      } else if (item.connection === "related") {
+        pills.createSpan({ cls: "rn-conn", text: "Related" });
+      }
+      if (item.reason) {
+        const why = this.whyLabel(item.reason);
+        // Skip a redundant "Linked" why when the connection pill already says it.
+        if (why && !(item.reason.kind === "linked" && item.connection === "linked")) {
+          pills.createSpan({ cls: "rn-why", text: why });
+        }
+      }
+    }
+
     const parentPath = item.file.parent?.path ?? "";
     if (parentPath.length > 0 && parentPath !== "/") {
       card.createDiv({ cls: "rn-path", text: parentPath });
     }
 
-    if (this.plugin.settings.showSnippet) {
+    // Centroid summary line (preferred) with the snippet as a graceful fallback.
+    if (this.plugin.settings.showSummary) {
+      const summary = this.plugin.store.getSummary(item.file);
+      const line = summary.length > 0 ? summary : this.plugin.getSnippet(item.file);
+      if (line.length > 0) {
+        card.createDiv({ cls: "rn-snippet", text: line });
+      }
+    } else if (this.plugin.settings.showSnippet) {
       const snippet = this.plugin.getSnippet(item.file);
       if (snippet.length > 0) {
         card.createDiv({ cls: "rn-snippet", text: snippet });
       }
     }
 
+    if (this.plugin.settings.showRecency) {
+      const rel = relativeTime(item.file.stat.mtime);
+      if (rel) card.createDiv({ cls: "rn-recency", text: `edited ${rel}` });
+    }
+
     card.addEventListener("click", () => {
       void this.app.workspace.getLeaf(false).openFile(item.file);
     });
   }
+
+  // Human label for a why-reason. Names the top shared tag for the shared-tags kind.
+  private whyLabel(reason: WhyReason): string {
+    switch (reason.kind) {
+      case "linked":
+        return "Linked";
+      case "shared-tags":
+        return reason.detail ? `#${reason.detail}` : "Shared tags";
+      case "co-cited":
+        return "Co-cited";
+      case "same-folder":
+        return "Same folder";
+      case "semantic":
+        return "Similar text";
+      default:
+        return "";
+    }
+  }
+}
+
+// Compact "edited 3d ago"-style relative time from an mtime (ms). Returns "" for a
+// missing/invalid timestamp.
+function relativeTime(mtime: number): string {
+  if (!mtime || !Number.isFinite(mtime)) return "";
+  const diff = Date.now() - mtime;
+  if (diff < 0) return "";
+  const min = 60 * 1000;
+  const hour = 60 * min;
+  const day = 24 * hour;
+  if (diff < hour) return "just now";
+  if (diff < day) return `${Math.floor(diff / hour)}h ago`;
+  if (diff < 30 * day) return `${Math.floor(diff / day)}d ago`;
+  if (diff < 365 * day) return `${Math.floor(diff / (30 * day))}mo ago`;
+  return `${Math.floor(diff / (365 * day))}y ago`;
 }
