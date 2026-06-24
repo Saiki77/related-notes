@@ -153,3 +153,12 @@
   font-size: var(--font-ui-smaller);
   color: var(--text-faint);
 }
+
+/* Settings: show the numeric value next to each slider. */
+.related-notes-slider-value {
+  min-width: 3.5em;
+  margin-right: 10px;
+  text-align: right;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}

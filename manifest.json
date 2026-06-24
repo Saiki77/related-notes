@@ -1,7 +1,7 @@
 {
   "id": "related-notes",
   "name": "Related Notes",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "minAppVersion": "1.7.2",
   "description": "Surface notes ranked by local semantic similarity to the one you're reading, as a left-sidebar card stack you can browse by relevance.",
   "author": "Saiki77",

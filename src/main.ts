@@ -44,9 +44,34 @@ export const DEFAULT_SETTINGS: RelatedNotesSettings = {
 // A few vetted model ids surfaced as a dropdown so users don't have to memorise
 // HF repo paths. Any other id can still be typed in the text field below.
 const MODEL_OPTIONS: Record<string, string> = {
-  "Xenova/multilingual-e5-small": "multilingual-e5-small (best DE+EN, needs prefix)",
+  "Xenova/multilingual-e5-small": "multilingual-e5-small (fast, DE+EN, needs prefix)",
   "Xenova/paraphrase-multilingual-MiniLM-L12-v2":
     "paraphrase-multilingual-MiniLM-L12-v2 (no prefix)",
+  "Xenova/paraphrase-multilingual-mpnet-base-v2":
+    "paraphrase-multilingual-mpnet-base-v2 (best quality, larger)",
+};
+
+// One-click presets. "Balanced" is light and fast; "Best quality" uses a larger
+// model and more context for the strongest matches. Each applies to the relevant
+// settings; the index rebuilds automatically if the model changes.
+type ProfileName = "balanced" | "best";
+const PROFILES: Record<ProfileName, Partial<RelatedNotesSettings>> = {
+  balanced: {
+    modelId: "Xenova/multilingual-e5-small",
+    device: "auto",
+    topK: 8,
+    minSimilarity: 0.4,
+    embedCharLimit: 1200,
+    showSnippet: true,
+  },
+  best: {
+    modelId: "Xenova/paraphrase-multilingual-mpnet-base-v2",
+    device: "auto",
+    topK: 20,
+    minSimilarity: 0.2,
+    embedCharLimit: 3500,
+    showSnippet: true,
+  },
 };
 
 // Length of the muted snippet shown on each card.
@@ -128,7 +153,9 @@ export default class RelatedNotesPlugin extends Plugin {
     );
 
     // --- incremental index maintenance ---------------------------------------
-    this.debouncedUpdate = debounce(() => void this.flushDirty(), 1500, false);
+    // 20s idle before re-embedding a changed note: typing (and the short pauses
+    // while typing) never kicks off embeddings — only a real edit pause does.
+    this.debouncedUpdate = debounce(() => void this.flushDirty(), 20000, false);
 
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
@@ -335,9 +362,42 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
     this.debouncedSave = debounce(() => void this.plugin.saveSettings(), 500, false);
   }
 
+  // Apply a one-click preset, persist (the index rebuilds if the model changed),
+  // then re-render so every control reflects the new values.
+  private async applyProfile(name: ProfileName): Promise<void> {
+    Object.assign(this.plugin.settings, PROFILES[name]);
+    await this.plugin.saveSettings();
+    this.render();
+    new Notice(
+      `Related notes: applied the ${name === "best" ? "Best quality" : "Balanced"} profile.`,
+    );
+  }
+
   display(): void {
+    this.render();
+  }
+
+  // The tab body, callable directly (e.g. after applying a profile) without the
+  // deprecated display() entry point.
+  private render(): void {
     const { containerEl } = this;
     containerEl.empty();
+
+    new Setting(containerEl)
+      .setName("Performance profile")
+      .setDesc(
+        "Quick presets. Balanced is lighter and faster; Best quality uses a larger model and more context for the strongest matches.",
+      )
+      .addButton((b) =>
+        b
+          .setButtonText("Balanced")
+          .onClick(() => void this.applyProfile("balanced")),
+      )
+      .addButton((b) =>
+        b
+          .setButtonText("Best quality")
+          .onClick(() => void this.applyProfile("best")),
+      );
 
     new Setting(containerEl)
       .setName("Model")
@@ -359,13 +419,14 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Compute device")
       .setDesc(
-        "Auto prefers your GPU (WebGPU) and falls back to CPU (WASM). Pin WASM if WebGPU is unstable on your machine.",
+        "On desktop, Obsidian runs native CPU embedding (fast) and Auto picks it automatically. WebGPU/WASM only apply in a pure-web context and fall back to CPU here.",
       )
       .addDropdown((d) =>
         d
-          .addOption("auto", "Auto (WebGPU, fallback CPU)")
-          .addOption("webgpu", "WebGPU (GPU)")
-          .addOption("wasm", "WASM (CPU)")
+          .addOption("auto", "Auto (recommended)")
+          .addOption("cpu", "CPU (native)")
+          .addOption("webgpu", "WebGPU")
+          .addOption("wasm", "WASM")
           .setValue(this.plugin.settings.device)
           .onChange(async (v) => {
             this.plugin.settings.device = v as DevicePref;
@@ -373,48 +434,70 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
           }),
       );
 
-    new Setting(containerEl)
-      .setName("Number of results")
-      .setDesc("How many related notes to show in the card stack.")
-      .addSlider((s) =>
+    {
+      const setting = new Setting(containerEl)
+        .setName("Number of results")
+        .setDesc("How many related notes to show in the card stack.");
+      const valueEl = setting.controlEl.createSpan({
+        cls: "related-notes-slider-value",
+        text: String(this.plugin.settings.topK),
+      });
+      setting.addSlider((s) =>
         s
           .setLimits(4, 30, 1)
           .setValue(this.plugin.settings.topK)
           .onChange((v) => {
             this.plugin.settings.topK = v;
+            valueEl.setText(String(v));
             this.debouncedSave();
           }),
       );
+    }
 
-    new Setting(containerEl)
-      .setName("Minimum similarity")
-      .setDesc(
-        "Hide notes below this cosine similarity (0–1). Lower shows more, looser matches; higher shows only close matches.",
-      )
-      .addSlider((s) =>
+    {
+      const setting = new Setting(containerEl)
+        .setName("Minimum similarity")
+        .setDesc(
+          "Hide notes below this cosine similarity (0–1). Lower shows more, looser matches; higher shows only close matches.",
+        );
+      const fmt = (v: number) => v.toFixed(2);
+      const valueEl = setting.controlEl.createSpan({
+        cls: "related-notes-slider-value",
+        text: fmt(this.plugin.settings.minSimilarity),
+      });
+      setting.addSlider((s) =>
         s
           .setLimits(0, 0.9, 0.05)
           .setValue(this.plugin.settings.minSimilarity)
           .onChange((v) => {
             this.plugin.settings.minSimilarity = v;
+            valueEl.setText(fmt(v));
             this.debouncedSave();
           }),
       );
+    }
 
-    new Setting(containerEl)
-      .setName("Embed character limit")
-      .setDesc(
-        "How many characters of each note's body to embed (after the title). More context is more accurate but slower to index.",
-      )
-      .addSlider((s) =>
+    {
+      const setting = new Setting(containerEl)
+        .setName("Embed character limit")
+        .setDesc(
+          "How many characters of each note's body to embed (after the title). More context is more accurate but slower to index.",
+        );
+      const valueEl = setting.controlEl.createSpan({
+        cls: "related-notes-slider-value",
+        text: String(this.plugin.settings.embedCharLimit),
+      });
+      setting.addSlider((s) =>
         s
           .setLimits(500, 4000, 100)
           .setValue(this.plugin.settings.embedCharLimit)
           .onChange((v) => {
             this.plugin.settings.embedCharLimit = v;
+            valueEl.setText(String(v));
             this.debouncedSave();
           }),
       );
+    }
 
     new Setting(containerEl)
       .setName("Excluded folders")

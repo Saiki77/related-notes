@@ -59,7 +59,7 @@ function configureEnv(): void {
 }
 
 // Device preference for the inference backend.
-export type DevicePref = "auto" | "webgpu" | "wasm";
+export type DevicePref = "auto" | "webgpu" | "wasm" | "cpu";
 
 // Progress events surfaced from pipeline() during the one-time model download.
 // transformers.js types this as `any`; narrow it to just the fields we read.
@@ -90,7 +90,7 @@ export class EmbeddingEngine {
   readonly modelId: string;
   readonly devicePref: DevicePref;
   private pipePromise: Promise<FeatureExtractionPipeline> | null = null;
-  private resolvedDevice: "webgpu" | "wasm" | null = null;
+  private resolvedDevice: "webgpu" | "wasm" | "cpu" | null = null;
 
   constructor(modelId: string, devicePref: DevicePref) {
     this.modelId = modelId;
@@ -98,7 +98,7 @@ export class EmbeddingEngine {
   }
 
   // The device the pipeline actually initialised on, once init() has resolved.
-  get device(): "webgpu" | "wasm" | null {
+  get device(): "webgpu" | "wasm" | "cpu" | null {
     return this.resolvedDevice;
   }
 
@@ -128,40 +128,54 @@ export class EmbeddingEngine {
     configureEnv();
 
     this.pipePromise = (async () => {
-      const build = (device: "webgpu" | "wasm") => {
+      const build = (device: "webgpu" | "wasm" | "cpu") => {
         this.resolvedDevice = device;
         return pipeline("feature-extraction", this.modelId, {
           device,
-          // q8 keeps the WASM download small and fast on CPU; fp32 is the WebGPU
+          // q8 keeps the download small and fast on CPU/WASM; fp32 is the WebGPU
           // default (accuracy over a slightly larger download).
           dtype: device === "webgpu" ? "fp32" : "q8",
           progress_callback: onProgress,
         });
       };
 
-      const wantGpu =
-        this.devicePref === "webgpu" ||
-        (this.devicePref === "auto" && (await EmbeddingEngine.webgpuAvailable()));
+      // Desktop Obsidian is Electron, so transformers.js loads onnxruntime-NODE,
+      // whose only execution provider is "cpu" — "webgpu"/"wasm" THROW there
+      // (that's the "Unsupported device" error). Under Node we therefore go
+      // straight to native CPU (fast); only a pure-web context (no Node) gets the
+      // WebGPU→WASM path. Every order ends in "cpu" so init can't dead-end.
+      const isNode =
+        typeof process !== "undefined" && !!process.versions?.node;
 
-      if (wantGpu) {
+      let order: Array<"webgpu" | "wasm" | "cpu">;
+      if (this.devicePref === "cpu") {
+        order = ["cpu"];
+      } else if (this.devicePref === "wasm") {
+        order = ["wasm", "cpu"];
+      } else if (this.devicePref === "webgpu") {
+        order = ["webgpu", "cpu"];
+      } else if (isNode) {
+        order = ["cpu"];
+      } else {
+        order = (await EmbeddingEngine.webgpuAvailable())
+          ? ["webgpu", "wasm", "cpu"]
+          : ["wasm", "cpu"];
+      }
+
+      let lastErr: unknown;
+      for (const device of order) {
         try {
-          return await build("webgpu");
+          return await build(device);
         } catch (e) {
-          console.warn(
-            "[related-notes] WebGPU init failed, falling back to WASM",
-            e,
-          );
+          lastErr = e;
+          console.warn(`[related-notes] ${device} init failed`, e);
         }
       }
-      try {
-        return await build("wasm");
-      } catch (e) {
-        // A hard failure here (no backend at all) must not be hidden. Reset so a
-        // later retry (e.g. after the user reconnects) can attempt init again.
-        this.pipePromise = null;
-        this.resolvedDevice = null;
-        throw e;
-      }
+      // Nothing worked: reset so a later retry can re-attempt, and surface it.
+      this.pipePromise = null;
+      this.resolvedDevice = null;
+      if (lastErr instanceof Error) throw lastErr;
+      throw new Error("No embedding backend available.");
     })();
 
     return this.pipePromise;
