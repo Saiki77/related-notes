@@ -446,6 +446,20 @@ function meanOf(buffer: Float32Array, count: number, dims: number): Float32Array
   return mean;
 }
 
+// Dot of chunk row `r` (offset r*dims) of a contiguous chunk buffer with a vector.
+// Both operands are L2-normalized, so the result is their cosine similarity.
+function dotRow(
+  buf: Float32Array,
+  r: number,
+  vec: Float32Array,
+  dims: number,
+): number {
+  const off = r * dims;
+  let dot = 0;
+  for (let d = 0; d < dims; d++) dot += buf[off + d] * vec[d];
+  return dot;
+}
+
 // =============================================================================
 // IndexStore
 // =============================================================================
@@ -1049,8 +1063,22 @@ export class IndexStore {
     // otherwise feed an empty inner loop. Today chunkCount >= 1 always (the title
     // chunk), but a future stricter chunkNote must not silently emit negatives.
     if (a.chunkCount === 0 || b.chunkCount === 0) return 0;
-    const aToB = this.directionalMax(a.chunks, a.chunkCount, b.chunks, b.chunkCount, dims);
-    const bToA = this.directionalMax(b.chunks, b.chunkCount, a.chunks, a.chunkCount, dims);
+    // A title-only STUB (chunkCount === 1 — an empty note) is grounded in the other
+    // note's OVERALL topic (its L2-normalized mean vector), not the single luckiest
+    // chunk match. directionalMax takes a MAX, so a one-word title would otherwise
+    // spuriously align with some passage and rank the empty note for an unrelated
+    // topic (e.g. a stub "Ableiten" surfacing under a security essay). Its meaning
+    // then comes mainly from the title-vs-overall similarity, as it should. Notes
+    // with any body (chunkCount >= 2) use full bidirectional MaxSim. mean + chunk
+    // rows are both normalized, so the dot IS a cosine; floor at 0 like the max.
+    const aToB =
+      a.chunkCount === 1
+        ? Math.max(0, dotRow(a.chunks, TITLE_CHUNK_INDEX, b.meanVector, dims))
+        : this.directionalMax(a.chunks, a.chunkCount, b.chunks, b.chunkCount, dims);
+    const bToA =
+      b.chunkCount === 1
+        ? Math.max(0, dotRow(b.chunks, TITLE_CHUNK_INDEX, a.meanVector, dims))
+        : this.directionalMax(b.chunks, b.chunkCount, a.chunks, a.chunkCount, dims);
     return (aToB + bToA) / 2;
   }
 
@@ -1256,7 +1284,13 @@ export class IndexStore {
     const label = entry?.summaryLabel;
     if (!label || label.length === 0) return "";
 
-    const text = truncateAtWord(label, SUMMARY_LABEL_CHARS);
+    // Suppress a label that just echoes the title — including basename labels stored
+    // by an older index for stub notes — so we don't repeat the card name. Done at
+    // display time too so the fix lands on a reload without forcing a re-embed.
+    const text =
+      label.toLowerCase() === file.basename.toLowerCase()
+        ? ""
+        : truncateAtWord(label, SUMMARY_LABEL_CHARS);
     this.summaryCache.set(file.path, { mtime: file.stat.mtime, text });
     return text;
   }
@@ -1286,19 +1320,20 @@ export class IndexStore {
     const allSurfaces: string[] = [];
     const offsets: number[] = [0];
     for (const entry of entries) {
-      const basename = baseNameFromPath(entry.path);
       const texts = entry.chunkTexts;
-      // No persisted text (empty note): label = title.
+      // No persisted text (empty/stub note): leave the label EMPTY so the card shows
+      // no line rather than echoing the title (already the card name). The stub's
+      // meaning is carried by the title-grounded score in biMax(), not a label.
       if (!texts || texts.length === 0) {
-        entry.summaryLabel = basename;
+        entry.summaryLabel = "";
         continue;
       }
-      // Candidate phrases from the body chunks (skip the title chunk as a source — the
-      // title is the fallback, and including it would just echo the basename).
+      // Candidate phrases from the body chunks (skip the title chunk as a source —
+      // including it would just echo the title).
       const source = texts.filter((_, i) => i !== TITLE_CHUNK_INDEX).join("\n");
       const candidates = generateCandidates(source);
       if (candidates.length === 0) {
-        entry.summaryLabel = basename;
+        entry.summaryLabel = "";
         continue;
       }
       pending.push({ entry, candidates });
@@ -1317,11 +1352,11 @@ export class IndexStore {
       vecs = await this.engine.embedBatch(allSurfaces, "passage");
     } catch (e) {
       console.warn("[related-notes] keyphrase label batch failed", e);
-      for (const { entry } of pending) entry.summaryLabel = baseNameFromPath(entry.path);
+      for (const { entry } of pending) entry.summaryLabel = "";
       return;
     }
     if (vecs.length !== allSurfaces.length) {
-      for (const { entry } of pending) entry.summaryLabel = baseNameFromPath(entry.path);
+      for (const { entry } of pending) entry.summaryLabel = "";
       return;
     }
 
@@ -1330,7 +1365,11 @@ export class IndexStore {
       const { entry, candidates } = pending[p];
       const slice = vecs.slice(offsets[p], offsets[p + 1]);
       const label = selectLabel(candidates, slice, entry.meanVector);
-      entry.summaryLabel = label.length > 0 ? label : baseNameFromPath(entry.path);
+      // Drop an empty label or one that just echoes the title — the view then shows
+      // the snippet (or nothing) instead of repeating the card name.
+      const echoesTitle =
+        label.toLowerCase() === baseNameFromPath(entry.path).toLowerCase();
+      entry.summaryLabel = label.length > 0 && !echoesTitle ? label : "";
     }
   }
 }
