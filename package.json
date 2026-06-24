@@ -1,6 +1,6 @@
 {
   "name": "related-notes",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Surface notes ranked by local semantic similarity to the one you're reading, as a sidebar card stack.",
   "main": "main.js",
   "scripts": {

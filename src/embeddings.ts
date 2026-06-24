@@ -3,7 +3,7 @@ import {
   env,
   type FeatureExtractionPipeline,
 } from "@huggingface/transformers";
-import { ORT_WEB_CDN } from "./ort-version";
+import { ORT_WEB_CDN, ORT_GLUE_JSEP } from "./ort-version";
 
 // --- transformers.js environment ---------------------------------------------
 // The onnxruntime-WEB backend is forced in ort-shim.ts (imported first in
@@ -39,36 +39,51 @@ export function setWasmBaseUrl(url: string): void {
   wasmBaseUrl = url.endsWith("/") ? url : `${url}/`;
 }
 
-// The onnxruntime-web wasm flags. ort reads these from ort.env.wasm.
+// The onnxruntime-web wasm flags. ort reads these from ort.env.wasm. wasmPaths may
+// be a directory string OR a { mjs, wasm } map pointing the glue and binary at
+// distinct URLs.
 interface OrtWasmFlags {
-  wasmPaths?: string | Record<string, string>;
+  wasmPaths?: string | { mjs?: string; wasm?: string };
   numThreads?: number;
   proxy?: boolean;
 }
+
+// Created lazily from the patched glue text, reused for the session.
+let glueBlobUrl: string | null = null;
 
 function configureEnv(): void {
   if (envConfigured) return;
   env.allowRemoteModels = true;
   env.allowLocalModels = false;
   env.useBrowserCache = true;
-  // CRITICAL: onnxruntime reads its wasm flags from ort.env.wasm, which
-  // transformers exposes as `env.backends.onnx.env.wasm` — NOT
-  // `env.backends.onnx.wasm` (that's undefined). Setting the wrong object meant
-  // numThreads=1 never applied: Obsidian's renderer is cross-origin isolated, so
-  // ort defaulted to multi-threading, spawned a pthread worker, and that worker
-  // tried to `import('worker_threads')` (a Node-only module) — the "Failed to
-  // resolve module specifier 'worker_threads'" / "no available backend" error.
-  // Set the flags on BOTH shapes so the object ort actually reads is always hit.
+
+  // The .wasm comes from the self-hosted ort/ folder when present, else the
+  // version-pinned CDN. The GLUE (.mjs), however, is served from a Blob of our
+  // PATCHED copy (gen-ort forces its Node check off) so onnxruntime-web takes the
+  // pure-web path and never imports the Node-only 'worker_threads' — that import,
+  // triggered because Obsidian's renderer has process.versions.node set and
+  // process.type !== "renderer" (read-only, can't flip), was the "no available
+  // backend found" error. ort accepts wasmPaths = { mjs, wasm }.
+  const wasmDir = wasmBaseUrl ?? ORT_WEB_CDN;
+  glueBlobUrl ??= URL.createObjectURL(
+    new Blob([ORT_GLUE_JSEP], { type: "text/javascript" }),
+  );
+  const wasmPaths = {
+    mjs: glueBlobUrl,
+    wasm: `${wasmDir}ort-wasm-simd-threaded.jsep.wasm`,
+  };
+
+  // ort reads its flags from ort.env.wasm, which transformers exposes as
+  // env.backends.onnx.env.wasm in the WEB build (NOT env.backends.onnx.wasm —
+  // that's the Node-build shape). Set on BOTH so the right object is always hit.
   const onnx = env.backends?.onnx as
     | { wasm?: OrtWasmFlags; env?: { wasm?: OrtWasmFlags } }
     | undefined;
   for (const wasm of [onnx?.wasm, onnx?.env?.wasm]) {
     if (!wasm) continue;
-    wasm.wasmPaths = wasmBaseUrl ?? ORT_WEB_CDN;
-    // Single-threaded: no pthread workers (which need Node's worker_threads), and
-    // the renderer can't share SharedArrayBuffer across threads cleanly anyway.
+    wasm.wasmPaths = wasmPaths;
+    // Single-threaded, no proxy worker — run the wasm inline on the main thread.
     wasm.numThreads = 1;
-    // No proxy worker either — run the wasm inline on the main thread.
     wasm.proxy = false;
   }
   envConfigured = true;
