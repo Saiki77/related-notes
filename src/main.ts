@@ -227,6 +227,11 @@ export default class RelatedNotesPlugin extends Plugin {
       this.pluginDir(),
       this.storeOptions(),
     );
+    // Lazy keyphrase labels: when a label finishes computing on first demand, the
+    // store asks the view to re-render the affected card(s). requestRender is itself
+    // debounced (300ms) in the view, so a batch of resolving labels collapses into
+    // one render pass — mirroring getSnippet's coalescing.
+    this.store.setRenderHook(() => this.getView()?.requestRender());
 
     // The precision backbone for both link features.
     this.titleIndex = new TitleIndex(this.app);

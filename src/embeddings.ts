@@ -4,6 +4,10 @@ import {
   type FeatureExtractionPipeline,
 } from "@huggingface/transformers";
 import { ORT_WEB_CDN, ORT_GLUE_JSEP } from "./ort-version";
+// cosineSimilarity now lives in the dependency-free vector-math module (so the
+// node benchmark can import it without pulling in transformers). Re-exported here
+// for back-compat with existing importers and the `cosineSimilarity` symbol.
+export { cosineSimilarity } from "./vector-math";
 
 // --- transformers.js environment ---------------------------------------------
 // The onnxruntime-WEB backend is forced in ort-shim.ts (imported first in
@@ -250,13 +254,4 @@ export class EmbeddingEngine {
     }
     return result;
   }
-}
-
-// Cosine similarity for two already-L2-normalized vectors == their dot product.
-// Returns 0 on a length mismatch (e.g. a stale vector from a different model).
-export function cosineSimilarity(a: Float32Array, b: Float32Array): number {
-  if (a.length !== b.length) return 0;
-  let dot = 0;
-  for (let i = 0; i < a.length; i++) dot += a[i] * b[i];
-  return dot;
 }

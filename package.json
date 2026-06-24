@@ -1,6 +1,6 @@
 {
   "name": "related-notes",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Surface notes ranked by local semantic similarity to the one you're reading, as a sidebar card stack.",
   "main": "main.js",
   "scripts": {
@@ -11,6 +11,7 @@
     "build": "tsc --noEmit && node esbuild.config.mjs production",
     "prelint": "node gen-ort.mjs",
     "lint": "eslint \"src/**/*.ts\"",
+    "bench": "node --experimental-strip-types bench/at-rest.mjs",
     "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [

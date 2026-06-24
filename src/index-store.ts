@@ -1,25 +1,45 @@
-import { App, TFile, Notice, normalizePath } from "obsidian";
+import { App, TFile, Notice, normalizePath, debounce, type Debouncer } from "obsidian";
+import { EmbeddingEngine, type ProgressCallback } from "./embeddings";
 import {
-  EmbeddingEngine,
   cosineSimilarity,
-  type ProgressCallback,
-} from "./embeddings";
+  meanOf,
+  dotRow,
+  quantizeChunksRaw,
+  dequantizeChunksRaw,
+  serializeIndex,
+  serializeManifest,
+  deserializeIndex,
+  type StoredIndexHeader,
+  type SerializableEntry,
+} from "./vector-math";
 
 // =============================================================================
 // SCHEMA / version constant. Bumped 1 -> 2 for the multi-vector layout (mean vector
 // PLUS a capped set of int8-quantized chunk vectors). Bumped 2 -> 3 for the keyphrase
-// summary LABEL: the per-note summary is now a tight 3–7-word topic label computed at
-// index time (KeyBERT-style: candidate phrases embedded and ranked by cosine to the
-// note mean, diversified with MMR) and PERSISTED on the entry — not a render-time
-// centroid-sentence pick. The label needs a model pass to compute, so it is produced
-// once during build and stored; a v2 index has no label field, so it is detected as
-// stale on load() and a full rebuild is triggered. Any index written for a different
-// model/dims, or a different quantization/text-persistence policy, is likewise
-// invalidated. No silent half-migration.
+// summary LABEL (KeyBERT-style topic label persisted on the entry). Bumped 3 -> 4 for
+// the BINARY index format: the int8 chunk buffers + fp32 means now live in a single
+// binary blob (index.bin) referenced by byte offsets from a small JSON manifest
+// (index.json), instead of megabytes of base64-in-JSON. The bump forces ONE clean
+// rebuild on upgrade — an old v3 single-file index.json parses with version !== 4 (or
+// has no companion index.bin) and is detected as stale, deleted, and rebuilt. Any
+// index written for a different model/dims, or a different quantization/text-
+// persistence policy, is likewise invalidated. No silent half-migration.
+//
+// NOTE: chunk vectors are now kept in RAM as int8 (the quantized buffer + per-row
+// scales) and dequantized to fp32 LAZILY — only when a note enters the Stage-2
+// shortlist — behind a small LRU cache. The dequant math (dequantizeChunksRaw) is
+// byte-for-byte the old load-time dequant, so ranking results are identical; only
+// memory + load time change.
 // =============================================================================
-const INDEX_VERSION = 3 as const;
+const INDEX_VERSION = 4 as const;
 
+// The small JSON manifest (header + per-entry metadata + scales + chunkTexts) and
+// the binary blob (all fp32 means + all int8 chunk buffers). Written/renamed via
+// matching .tmp files for crash-safety.
 const STORE_FILE = "index.json";
+const BIN_FILE = "index.bin";
+const JSON_TMP_FILE = "index.json.tmp";
+const BIN_TMP_FILE = "index.bin.tmp";
 const BATCH_SIZE = 8;
 
 // Chunking knobs. MAX_CHUNKS is the body-chunk cap (the title chunk is extra, so a
@@ -83,53 +103,62 @@ const TARGET_LABEL_WORDS_MAX = 7;
 // MMR trade-off: lambda 0.6 is slightly relevance-biased (KeyBERT diversity ≈ 0.4).
 const MMR_LAMBDA = 0.6;
 
-// On-disk shape of one chunk block: a symmetric per-vector int8 quantization. The
-// `q` string is base64 of one Int8Array of length chunkCount*dims; `scales` holds
-// one fp32 scale per chunk row (max|v|/127). Dequantized + re-normalized on load.
-interface StoredChunkBlock {
-  scales: number[];
-  q: string; // base64(Int8Array)
-}
+// --- lazy keyphrase-label drainer knobs -------------------------------------
+// First getSummary() demand for a note schedules its label; the drainer coalesces
+// pending paths and computes them in batches. DRAIN_BATCH labels per pass keeps the
+// extra ONNX work bounded; the debounce mirrors main.ts's flushDirty/getSnippet
+// coalescing so a flurry of first-paint cards collapses into a few drains.
+const LABEL_DRAIN_DEBOUNCE_MS = 250;
+const LABEL_DRAIN_BATCH = 8;
 
-// On-disk shape of one embedded note. The mean vector stays fp32 (it drives the
-// Stage-1 coarse shortlist and is only ~1/N of the data; the user-facing
-// minSimilarity floor is applied later against the Stage-2 BiMax score).
-interface StoredEntry {
-  path: string;
-  mtime: number;
-  dims: number;
-  chunkCount: number;
-  meanVector: number[]; // fp32
-  chunks: StoredChunkBlock; // int8-quantized chunk vectors
-  chunkTexts?: string[]; // only persisted when summary feature is on
-  summaryLabel?: string; // KeyBERT-style topic label, computed at index time
-}
+// --- scale-aware adaptive chunk cap -----------------------------------------
+// The index/RAM/rank cost is roughly linear in chunkCount and the Stage-2 cost
+// quadratic in it, so for very large vaults we clamp the effective per-note chunk
+// cap DOWN from whatever the user configured. Normal vaults (<= 2000 notes) keep
+// the configured cap exactly — byte-for-byte unchanged behavior. This only ever
+// LOWERS the cap automatically; nothing to configure.
+const ADAPTIVE_CHUNK_TIERS: { maxNotes: number; cap: number }[] = [
+  { maxNotes: 5000, cap: 12 },
+  { maxNotes: 10000, cap: 10 },
+  { maxNotes: Infinity, cap: 8 },
+];
+const ADAPTIVE_CHUNK_FLOOR_NOTES = 2000;
 
-// Header + body persisted to the plugin config dir. `version`/`modelId`/`dims`
-// gate a full rebuild. `quantized`/`hasChunkText` make a future change of
-// quantization or text-persistence policy detectable and self-invalidating.
-interface StoredIndex {
-  version: typeof INDEX_VERSION;
-  modelId: string;
-  dims: number;
-  quantized: boolean;
-  hasChunkText: boolean;
-  entries: StoredEntry[];
-}
+// --- LRU dequant cache floor ------------------------------------------------
+// The fp32 dequant cache is sized 3x the shortlist width (active note + current
+// shortlist + the previous switch's shortlist stay warm), clamped to this floor so
+// it never collapses when the user lowers topK/shortlistSize.
+const DEQUANT_CACHE_FLOOR = 256;
 
-// In-memory entry. The chunk vectors are kept as ONE contiguous Float32Array of
-// length chunkCount*dims (cache-friendly for the Stage-2 dot loops); the mean
-// drives Stage 1. chunkTexts are only present when summaries are enabled.
+// Yield a real macrotask so the renderer can paint + process input between embed
+// batches — a big vault never freezes Obsidian even when microtask-only sleeps
+// coalesce. window.setTimeout(0) is the documented "yield a macrotask" (and the
+// window-scoped timer keeps popout-window compatibility per obsidianmd lint).
+const yieldToUI = (): Promise<void> =>
+  new Promise<void>((r) => window.setTimeout(r, 0));
+
+// In-memory entry. The chunk vectors are kept as int8 in RAM (`chunkBytes`, length
+// chunkCount*dims, plus one fp32 `scales` per row) — ~4x smaller than fp32 — and
+// dequantized to a contiguous Float32Array LAZILY (only when the note enters the
+// Stage-2 shortlist) behind the DequantCache LRU. The fp32 mean drives Stage 1 and
+// stays in RAM. chunkTexts are only present when summaries are enabled.
+//
+// After deserialize, `meanVector` is a Float32Array VIEW into the shared on-disk
+// blob and `chunkBytes` an Int8Array VIEW into it (the int8 at-rest footprint);
+// freshly-built entries own standalone typed arrays. Both are structurally a
+// SerializableEntry, so persist() can hand them straight to serializeIndex.
 interface IndexEntry {
   path: string;
   mtime: number;
   dims: number;
   chunkCount: number;
   meanVector: Float32Array;
-  chunks: Float32Array; // length == chunkCount * dims
+  chunkBytes: Int8Array; // length == chunkCount * dims, int8-quantized rows
+  scales: number[]; // length == chunkCount, one fp32 scale per row
   chunkTexts?: string[];
-  // The note's topic LABEL (3–7 words), computed once at index time from the note's
-  // own chunks (KeyBERT-style) and persisted. Present only when summaries are on.
+  // The note's topic LABEL (3–7 words). With LAZY labels it is computed on FIRST
+  // getSummary() demand (not at build), persisted, and re-rendered when ready.
+  // Present only when summaries are on. Undefined until first computed.
   summaryLabel?: string;
 }
 
@@ -341,123 +370,82 @@ function windowSentences(sentences: string[]): string[] {
 }
 
 // =============================================================================
-// int8 quantization helpers (chunk block only — the mean stays fp32)
+// DequantCache — lazy int8 -> fp32 chunk dequant behind an LRU
 // =============================================================================
 
-function base64FromInt8(arr: Int8Array): string {
-  // Reinterpret the signed bytes as unsigned for btoa, chunked to avoid call-stack
-  // limits on very large blocks.
-  const bytes = new Uint8Array(arr.buffer, arr.byteOffset, arr.byteLength);
-  let binary = "";
-  const STEP = 0x8000;
-  for (let i = 0; i < bytes.length; i += STEP) {
-    const slice = bytes.subarray(i, Math.min(i + STEP, bytes.length));
-    binary += String.fromCharCode(...slice);
-  }
-  return btoa(binary);
-}
+// Dequantizing every note's chunks at load time costs ~4x the steady-state RAM
+// (fp32 vs int8) and a load-time CPU pass. Instead chunks live in RAM as int8 and
+// are dequantized to a contiguous fp32 buffer ON DEMAND — only when a note enters
+// the Stage-2 shortlist — through this small LRU. The dequant math is byte-for-byte
+// the old load-time dequant (dequantizeChunksRaw), so the fp32 buffers BiMax sees
+// are bit-identical: ranking results are unchanged, only WHEN dequant runs moved.
+//
+// A JS Map preserves insertion order, which we use directly as LRU order: a get()
+// hit re-inserts (moves to MRU); on overflow we evict the first (LRU) key.
+class DequantCache {
+  private cache = new Map<string, Float32Array>();
+  private cap: number;
+  // One-time guard so a genuine length/scale mismatch (the null path below) is
+  // observable in the console rather than silently scoring the note 0 forever.
+  private warnedNull = false;
 
-function int8FromBase64(b64: string): Int8Array {
-  const binary = atob(b64);
-  const out = new Int8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    // charCodeAt is 0..255; reinterpret as signed int8.
-    out[i] = (binary.charCodeAt(i) << 24) >> 24;
+  constructor(cap: number) {
+    this.cap = Math.max(DEQUANT_CACHE_FLOOR, cap);
   }
-  return out;
-}
 
-// Quantize a contiguous fp32 chunk buffer (chunkCount rows of `dims`) into a
-// symmetric per-row int8 block. Returns the base64 payload + per-row scales.
-function quantizeChunks(
-  chunks: Float32Array,
-  chunkCount: number,
-  dims: number,
-): StoredChunkBlock {
-  const q = new Int8Array(chunkCount * dims);
-  const scales = new Array<number>(chunkCount);
-  for (let c = 0; c < chunkCount; c++) {
-    const off = c * dims;
-    let maxAbs = 0;
-    for (let i = 0; i < dims; i++) {
-      const a = Math.abs(chunks[off + i]);
-      if (a > maxAbs) maxAbs = a;
+  // Return the fp32 chunk buffer for an entry, dequantizing + caching on a miss.
+  // On a hit the key is moved to MRU so the active note + current shortlist stay warm.
+  get(entry: IndexEntry): Float32Array {
+    const hit = this.cache.get(entry.path);
+    if (hit) {
+      this.cache.delete(entry.path);
+      this.cache.set(entry.path, hit);
+      return hit;
     }
-    const scale = maxAbs > 0 ? maxAbs / 127 : 1;
-    scales[c] = scale;
-    for (let i = 0; i < dims; i++) {
-      let v = Math.round(chunks[off + i] / scale);
-      if (v > 127) v = 127;
-      else if (v < -127) v = -127;
-      q[off + i] = v;
+    const dequantized = dequantizeChunksRaw(
+      entry.chunkBytes,
+      entry.scales,
+      entry.chunkCount,
+      entry.dims,
+    );
+    if (dequantized === null && !this.warnedNull) {
+      // Should be unreachable — entries are validated on load()/build() — so a hit
+      // here means a real invariant break (int8 buffer / scales length mismatch).
+      // Warn once; the note still scores 0 via the zero-buffer fallback (no crash).
+      this.warnedNull = true;
+      console.warn(
+        "[related-notes] chunk dequant returned null (length/scale mismatch); the affected note will score 0. This indicates a corrupt index entry — a manual reindex should clear it.",
+      );
     }
+    const f = dequantized ?? new Float32Array(entry.chunkCount * entry.dims);
+    this.cache.set(entry.path, f);
+    if (this.cache.size > this.cap) {
+      const lru = this.cache.keys().next().value;
+      if (lru !== undefined) this.cache.delete(lru);
+    }
+    return f;
   }
-  return { scales, q: base64FromInt8(q) };
-}
 
-// Dequantize an int8 chunk block back to a contiguous fp32 buffer and RE-NORMALIZE
-// each row (quantization perturbs the L2 norm by ~1-4%; cosineSimilarity assumes
-// unit vectors). Returns null when the payload is the wrong length.
-function dequantizeChunks(
-  block: StoredChunkBlock,
-  chunkCount: number,
-  dims: number,
-): Float32Array | null {
-  const q = int8FromBase64(block.q);
-  if (q.length !== chunkCount * dims) return null;
-  if (block.scales.length !== chunkCount) return null;
-  const out = new Float32Array(chunkCount * dims);
-  for (let c = 0; c < chunkCount; c++) {
-    const off = c * dims;
-    const scale = block.scales[c];
-    let sumSq = 0;
-    for (let i = 0; i < dims; i++) {
-      const v = q[off + i] * scale;
-      out[off + i] = v;
-      sumSq += v * v;
-    }
-    const norm = Math.sqrt(sumSq);
-    if (norm > 0) {
-      const inv = 1 / norm;
-      for (let i = 0; i < dims; i++) out[off + i] *= inv;
+  // Evict one path's fp32 buffer (on re-embed/remove/rename) so ranking never reads
+  // an outdated vector.
+  delete(path: string): void {
+    this.cache.delete(path);
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+
+  // Resize on an options change. Lowering the cap evicts the oldest entries down to
+  // the new (floored) cap; raising it just lets the cache grow.
+  setCap(cap: number): void {
+    this.cap = Math.max(DEQUANT_CACHE_FLOOR, cap);
+    while (this.cache.size > this.cap) {
+      const lru = this.cache.keys().next().value;
+      if (lru === undefined) break;
+      this.cache.delete(lru);
     }
   }
-  return out;
-}
-
-// Mean of a set of unit vectors, re-L2-normalized. Operates over a contiguous
-// buffer of `count` rows of `dims`.
-function meanOf(buffer: Float32Array, count: number, dims: number): Float32Array {
-  const mean = new Float32Array(dims);
-  for (let c = 0; c < count; c++) {
-    const off = c * dims;
-    for (let i = 0; i < dims; i++) mean[i] += buffer[off + i];
-  }
-  let sumSq = 0;
-  for (let i = 0; i < dims; i++) {
-    mean[i] /= count;
-    sumSq += mean[i] * mean[i];
-  }
-  const norm = Math.sqrt(sumSq);
-  if (norm > 0) {
-    const inv = 1 / norm;
-    for (let i = 0; i < dims; i++) mean[i] *= inv;
-  }
-  return mean;
-}
-
-// Dot of chunk row `r` (offset r*dims) of a contiguous chunk buffer with a vector.
-// Both operands are L2-normalized, so the result is their cosine similarity.
-function dotRow(
-  buf: Float32Array,
-  r: number,
-  vec: Float32Array,
-  dims: number,
-): number {
-  const off = r * dims;
-  let dot = 0;
-  for (let d = 0; d < dims; d++) dot += buf[off + d] * vec[d];
-  return dot;
 }
 
 // =============================================================================
@@ -501,6 +489,39 @@ export class IndexStore {
   // invalidated whenever a file is added/removed/renamed.
   private ambiguousBasenames: Set<string> | null = null;
 
+  // LAZY chunk dequant: chunks live in RAM as int8; this LRU holds the fp32 buffers
+  // for notes currently being ranked (Stage-2 shortlist + active note). Sized 3x the
+  // shortlist width in updateOptions(); biMax() resolves chunks through it.
+  private dequant: DequantCache;
+
+  // LAZY keyphrase labels. A note's label is computed on FIRST getSummary() demand,
+  // not at build time. `labelQueue` holds paths pending a (debounced, batched)
+  // compute; `labelDone` holds paths already attempted (so a note whose label
+  // computes to "" — e.g. a stub — never re-queues forever). The drainer reuses
+  // computeSummaryLabels() VERBATIM and persists ONLY the manifest (no blob rewrite).
+  private labelQueue = new Set<string>();
+  private labelDone = new Set<string>();
+  private debouncedDrainLabels: Debouncer<[], void>;
+
+  // The store has no view reference; the plugin installs this so a resolved label
+  // can ask the view to re-render the affected card(s). requestRender is itself
+  // debounced in the view, so N resolving labels collapse into one render pass.
+  private renderHook?: () => void;
+
+  // Set while a VECTOR-MUTATING op (incremental embed/remove/rename) is between its
+  // mutation of `this.entries` and the matching full persist(). During that window
+  // the live entries and the on-disk blob disagree, so the label drainer must NOT
+  // run persistManifestOnly() — its manifest offsets/totalBytes would describe the
+  // NEW entry set while the blob on disk is still the OLD one. (load() self-heals a
+  // skew via the totalBytes check, but this avoids a needless rebuild after a crash
+  // in that window.) When set, drainLabels() defers and lets the next full persist
+  // carry the labels.
+  private vectorWriteInFlight = false;
+
+  // Scale-aware effective chunk cap, set at the start of build() from the vault
+  // size. Undefined until the first build, where the getter falls back to the base.
+  private effectiveMaxChunks: number | undefined;
+
   constructor(
     app: App,
     engine: EmbeddingEngine,
@@ -511,6 +532,29 @@ export class IndexStore {
     this.engine = engine;
     this.configDir = configDir;
     this.options = options;
+    this.dequant = new DequantCache(this.cacheCapFor(options));
+    this.debouncedDrainLabels = debounce(
+      () => void this.drainLabels(),
+      LABEL_DRAIN_DEBOUNCE_MS,
+      false,
+    );
+  }
+
+  // The plugin installs a re-render callback after constructing the store, so a
+  // lazily-computed label can refresh its card without the store holding a view ref.
+  setRenderHook(fn: () => void): void {
+    this.renderHook = fn;
+  }
+
+  // The shortlist Stage-1 -> Stage-2 funnel width (also the slice width in rank()).
+  private shortlistWidth(o: IndexStoreOptions): number {
+    return Math.max(o.topK * 4, o.shortlistSize || DEFAULT_SHORTLIST);
+  }
+
+  // Dequant LRU capacity: 3x the shortlist width keeps the active note + the current
+  // shortlist + the previous switch's shortlist warm, floored so it never collapses.
+  private cacheCapFor(o: IndexStoreOptions): number {
+    return Math.max(DEQUANT_CACHE_FLOOR, this.shortlistWidth(o) * 3);
   }
 
   // --- status plumbing -------------------------------------------------------
@@ -534,6 +578,8 @@ export class IndexStore {
 
   updateOptions(options: IndexStoreOptions): void {
     this.options = options;
+    // Re-size the dequant LRU when topK/shortlistSize change (clamped to the floor).
+    this.dequant.setCap(this.cacheCapFor(options));
   }
 
   // --- suggester support (Feature B) -----------------------------------------
@@ -587,103 +633,227 @@ export class IndexStore {
     this.wordCache.clear();
     this.summaryCache.clear();
     this.ambiguousBasenames = null;
+    // A different model invalidates every dequantized buffer + every pending/done
+    // label (they were computed against the old model's mean vectors).
+    this.dequant.clear();
+    this.labelQueue.clear();
+    this.labelDone.clear();
+    this.effectiveMaxChunks = undefined;
     this.setProgress({ status: "idle", done: 0, total: 0, message: undefined });
   }
 
-  private get maxChunks(): number {
+  // Base chunk cap from options. The EFFECTIVE cap (what chunkNote actually uses) is
+  // this clamped down for very large vaults — see effectiveMaxChunks / build().
+  private get baseMaxChunks(): number {
     return Math.max(1, this.options.maxChunks || DEFAULT_MAX_CHUNKS);
   }
 
+  // The cap chunkNote() reads. Before the first build (e.g. an incremental embedFile
+  // on startup) effectiveMaxChunks is unset and we fall back to the base cap.
+  private get maxChunks(): number {
+    return this.effectiveMaxChunks ?? this.baseMaxChunks;
+  }
+
+  // SCALE-AWARE: lower the configured cap for very large vaults (cost is ~linear in
+  // chunkCount, Stage-2 quadratic). Vaults at/under the floor keep the base cap
+  // exactly. Never raises the cap.
+  private adaptiveMaxChunks(noteCount: number): number {
+    const base = this.baseMaxChunks;
+    if (noteCount <= ADAPTIVE_CHUNK_FLOOR_NOTES) return base;
+    for (const tier of ADAPTIVE_CHUNK_TIERS) {
+      if (noteCount <= tier.maxNotes) return Math.min(base, tier.cap);
+    }
+    return base;
+  }
+
   // --- persistence -----------------------------------------------------------
-  private get storePath(): string {
+  private get jsonPath(): string {
     return normalizePath(`${this.configDir}/${STORE_FILE}`);
   }
 
-  // Load a persisted index from the plugin config dir. Returns false (so the
-  // caller triggers a build) when the file is missing, malformed, or was written
-  // for a different model/dimension/version — including any old version-1 index,
-  // which forces a full rebuild on upgrade.
+  private get binPath(): string {
+    return normalizePath(`${this.configDir}/${BIN_FILE}`);
+  }
+
+  private get jsonTmpPath(): string {
+    return normalizePath(`${this.configDir}/${JSON_TMP_FILE}`);
+  }
+
+  private get binTmpPath(): string {
+    return normalizePath(`${this.configDir}/${BIN_TMP_FILE}`);
+  }
+
+  // Load a persisted index (binary format). Returns false (so the caller triggers a
+  // build) when either file is missing, malformed, or was written for a different
+  // model/dimension/version — including ANY old single-file (v3 base64-JSON) index,
+  // which has version !== 4 and/or no companion index.bin and so forces a clean
+  // rebuild on upgrade. A detected-stale state also removes the old artifacts so no
+  // orphaned multi-MB base64 file lingers.
   async load(): Promise<boolean> {
     this.setProgress({ status: "loading", done: 0, total: 0 });
+    const adapter = this.app.vault.adapter;
     try {
-      const adapter = this.app.vault.adapter;
-      if (!(await adapter.exists(this.storePath))) {
+      const hasJson = await adapter.exists(this.jsonPath);
+      const hasBin = await adapter.exists(this.binPath);
+      // Missing manifest entirely: nothing to load (and clean any stale .tmp).
+      if (!hasJson) {
+        await this.discardStaleIndex();
         this.setProgress({ status: "idle" });
         return false;
       }
-      const raw = await adapter.read(this.storePath);
-      const data = JSON.parse(raw) as StoredIndex;
+      // Manifest present but no blob (old v3 single-file format, or a crash mid-
+      // migration): stale. Delete both + tmp so the next persist writes a clean pair.
+      if (!hasBin) {
+        await this.discardStaleIndex();
+        this.setProgress({ status: "idle" });
+        return false;
+      }
+
+      const json = await adapter.read(this.jsonPath);
+      const header = JSON.parse(json) as StoredIndexHeader;
       if (
-        data.version !== INDEX_VERSION ||
-        data.modelId !== this.engine.modelId ||
-        data.quantized !== true ||
-        !Array.isArray(data.entries)
+        header.version !== INDEX_VERSION ||
+        header.modelId !== this.engine.modelId ||
+        header.quantized !== true ||
+        !header.dims ||
+        !Array.isArray(header.entries)
       ) {
+        await this.discardStaleIndex();
         this.setProgress({ status: "idle" });
         return false;
       }
-      // The summary feature needs persisted chunk text. If the user has it ON but
-      // this index was written without it (hasChunkText false), the cards would show
-      // empty summaries (snippet fallback) until some future rebuild. Treat it as
-      // stale so the caller re-embeds once and summaries work from the first load,
-      // rather than degrading silently. (The reverse — text persisted but feature
-      // off — is harmless: the extra text is simply ignored.)
-      if (this.options.showSummary && data.hasChunkText !== true) {
+      // The summary feature needs persisted chunk text (lazy labels still read
+      // chunkTexts on first demand). If the user has it ON but this index was written
+      // without it, treat it as stale so the caller re-embeds once.
+      if (this.options.showSummary && header.hasChunkText !== true) {
+        await this.discardStaleIndex();
         this.setProgress({ status: "idle" });
         return false;
       }
+
+      const blob = await adapter.readBinary(this.binPath);
+      if (blob.byteLength !== header.totalBytes) {
+        // Half-written blob or manifest/blob skew: rebuild from scratch.
+        await this.discardStaleIndex();
+        this.setProgress({ status: "idle" });
+        return false;
+      }
+
+      // Build lazy int8 entries — NO dequant pass. Each entry's meanVector/chunkBytes
+      // are views into `blob`, kept alive by the entries themselves.
+      const { entries } = deserializeIndex(json, blob);
       const loaded = new Map<string, IndexEntry>();
-      for (const e of data.entries) {
-        if (e.dims !== data.dims) continue;
-        if (e.meanVector.length !== data.dims) continue;
-        const chunks = dequantizeChunks(e.chunks, e.chunkCount, e.dims);
-        if (!chunks) continue;
+      for (const e of entries) {
+        if (e.dims !== header.dims) continue;
+        if (e.meanVector.length !== header.dims) continue;
         loaded.set(e.path, {
           path: e.path,
           mtime: e.mtime,
           dims: e.dims,
           chunkCount: e.chunkCount,
-          meanVector: Float32Array.from(e.meanVector),
-          chunks,
+          meanVector: e.meanVector,
+          chunkBytes: e.chunkBytes,
+          scales: e.scales,
           chunkTexts: e.chunkTexts,
           summaryLabel: e.summaryLabel,
         });
       }
       this.entries = loaded;
+      this.dequant.clear();
+      this.labelQueue.clear();
+      this.labelDone.clear();
       this.setProgress({ status: "ready", done: loaded.size, total: loaded.size });
       return true;
     } catch (e) {
       console.warn("[related-notes] failed to load index, will rebuild", e);
+      // Best-effort cleanup so a corrupt pair doesn't wedge every future load.
+      await this.discardStaleIndex().catch(() => undefined);
       this.setProgress({ status: "idle" });
       return false;
     }
   }
 
+  // Remove the on-disk index artifacts (manifest, blob, and any leftover .tmp files,
+  // including an old single-file v3 index.json that has no companion blob). Best
+  // effort: each remove is guarded so a missing file is not an error.
+  private async discardStaleIndex(): Promise<void> {
+    const adapter = this.app.vault.adapter;
+    for (const p of [
+      this.jsonPath,
+      this.binPath,
+      this.jsonTmpPath,
+      this.binTmpPath,
+    ]) {
+      try {
+        if (await adapter.exists(p)) await adapter.remove(p);
+      } catch {
+        // ignore — a missing/locked stale file must not block a rebuild.
+      }
+    }
+  }
+
+  // Build SerializableEntry[] from the live entries. chunkBytes/scales are already
+  // int8 in RAM — no re-quantize. meanVector is fp32 (a standalone array on fresh
+  // entries, or a view into the previous blob on loaded ones — serializeIndex copies
+  // only each view's own bytes, so a view is safe to pass).
+  private serializableEntries(): SerializableEntry[] {
+    return Array.from(this.entries.values());
+  }
+
+  // Full persist: manifest + blob, crash-safe. Writes both .tmp files, then renames
+  // the BLOB into place BEFORE the manifest, so a crash never leaves a manifest
+  // pointing at a missing/half-written blob (the worst case is a committed blob with
+  // the old manifest — load() validates totalBytes and rebuilds if they skew).
   private async persist(): Promise<void> {
+    // Empty vault (everything excluded, or a brand-new vault): there is nothing to
+    // rank and no dims to record. Writing a dims=0 / 0-byte index would only make
+    // load()'s `!header.dims` gate treat it as stale and rebuild every startup, so
+    // skip the write and clear any prior artifacts instead. An empty build is instant.
+    if (this.entries.size === 0) {
+      await this.discardStaleIndex();
+      return;
+    }
     const dims = this.firstDims();
     const keepText = this.options.showSummary;
-    const data: StoredIndex = {
-      version: INDEX_VERSION,
+    const { json, blob } = serializeIndex(this.serializableEntries(), {
       modelId: this.engine.modelId,
       dims,
-      quantized: true,
       hasChunkText: keepText,
-      entries: Array.from(this.entries.values()).map((e) => ({
-        path: e.path,
-        mtime: e.mtime,
-        dims: e.dims,
-        chunkCount: e.chunkCount,
-        meanVector: Array.from(e.meanVector),
-        chunks: quantizeChunks(e.chunks, e.chunkCount, e.dims),
-        ...(keepText && e.chunkTexts ? { chunkTexts: e.chunkTexts } : {}),
-        ...(keepText && e.summaryLabel ? { summaryLabel: e.summaryLabel } : {}),
-      })),
-    };
+      version: INDEX_VERSION,
+    });
     const adapter = this.app.vault.adapter;
     if (!(await adapter.exists(this.configDir))) {
       await adapter.mkdir(this.configDir);
     }
-    await adapter.write(this.storePath, JSON.stringify(data));
+    // writeBinary requires a true ArrayBuffer; serializeIndex returns exactly that.
+    await adapter.writeBinary(this.binTmpPath, blob);
+    await adapter.write(this.jsonTmpPath, json);
+    await adapter.rename(this.binTmpPath, this.binPath);
+    await adapter.rename(this.jsonTmpPath, this.jsonPath);
+  }
+
+  // MANIFEST-ONLY persist for a label-only change. The vectors did not move, so the
+  // blob (and every byte offset / totalBytes) is unchanged — rewriting just the
+  // manifest is consistent with the on-disk blob and avoids a multi-MB rewrite per
+  // label batch. ONLY the label drainer may call this; any vector mutation must go
+  // through full persist().
+  private async persistManifestOnly(): Promise<void> {
+    if (this.entries.size === 0) return;
+    const dims = this.firstDims();
+    const keepText = this.options.showSummary;
+    // Header-only: same offsets/totalBytes as the live blob, no multi-MB blob copy.
+    const json = serializeManifest(this.serializableEntries(), {
+      modelId: this.engine.modelId,
+      dims,
+      hasChunkText: keepText,
+      version: INDEX_VERSION,
+    });
+    const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(this.configDir))) {
+      await adapter.mkdir(this.configDir);
+    }
+    await adapter.write(this.jsonTmpPath, json);
+    await adapter.rename(this.jsonTmpPath, this.jsonPath);
   }
 
   private firstDims(): number {
@@ -782,6 +952,16 @@ export class IndexStore {
     try {
       const files = this.indexableFiles();
       const total = files.length;
+      // SCALE-AWARE: fix the effective per-note chunk cap for this build from the
+      // vault size (only lowers it for very large vaults; normal vaults unchanged).
+      this.effectiveMaxChunks = this.adaptiveMaxChunks(total);
+      // A forced full re-embed replaces every vector; drop any stale fp32 dequant +
+      // pending labels so ranking/labels never read outdated data mid-rebuild.
+      if (force) {
+        this.dequant.clear();
+        this.labelQueue.clear();
+        this.labelDone.clear();
+      }
       this.setProgress({ status: "building", done: 0, total, message: undefined });
 
       const notice = new Notice("Related notes: indexing…", 0);
@@ -824,7 +1004,6 @@ export class IndexStore {
                 "query",
                 onProgress,
               );
-              const assembled: IndexEntry[] = [];
               for (let f = 0; f < pendingFiles.length; f++) {
                 const { file, chunks } = pendingFiles[f];
                 const start = offsets[f];
@@ -833,13 +1012,16 @@ export class IndexStore {
                 if (entry) {
                   next.set(file.path, entry);
                   this.summaryCache.delete(file.path);
-                  assembled.push(entry);
+                  // A re-embedded note's old fp32 dequant + label state is stale.
+                  this.dequant.delete(file.path);
+                  this.labelQueue.delete(file.path);
+                  this.labelDone.delete(file.path);
                   embedded++;
                 }
               }
-              // One extra ONNX pass for the WHOLE batch's keyphrase labels (no-op when
-              // summaries are off), not one per note — keeps the build cost bounded.
-              await this.computeSummaryLabels(assembled);
+              // LAZY LABELS: no keyphrase pass at build time. Labels are computed on
+              // first getSummary() demand (halving indexing time); chunkTexts are
+              // still persisted (when summaries are on) so the demand-time pass works.
             } catch (e) {
               if (!firstError) firstError = e;
               console.warn("[related-notes] batch embed failed", e);
@@ -850,7 +1032,9 @@ export class IndexStore {
           const pct = total > 0 ? Math.round((done / total) * 100) : 100;
           notice.setMessage(`Related notes: indexing… ${pct}% (${done}/${total})`);
           this.setProgress({ done, total });
-          await sleep(0);
+          // YIELD a real macrotask so the renderer paints + processes input between
+          // batches — a big vault never freezes Obsidian.
+          await yieldToUI();
         }
       } finally {
         notice.hide();
@@ -889,9 +1073,10 @@ export class IndexStore {
   }
 
   // Regroup a slice [start, end) of the batch's flat vector list into one note's
-  // contiguous chunk buffer + re-normalized mean. Returns null if the slice is
-  // empty or dims can't be determined. The summaryLabel is filled separately by
-  // computeSummaryLabels() (it needs its own model pass), so it is left undefined here.
+  // re-normalized mean + an int8-quantized chunk buffer. Returns null if the slice
+  // is empty or dims can't be determined. The fp32 chunk buffer is quantized to int8
+  // immediately and DISCARDED, so RAM stays int8 even mid-build. The summaryLabel is
+  // left undefined — it is now computed lazily on first getSummary() demand.
   private assembleEntry(
     file: TFile,
     chunks: NoteChunk[],
@@ -912,6 +1097,9 @@ export class IndexStore {
       buffer.set(v, c * dims);
     }
     const meanVector = meanOf(buffer, count, dims);
+    // Quantize to int8 NOW and drop the fp32 buffer; it is re-expanded lazily by the
+    // DequantCache only if/when this note enters a Stage-2 shortlist.
+    const { q, scales } = quantizeChunksRaw(buffer, count, dims);
 
     return {
       path: file.path,
@@ -919,7 +1107,8 @@ export class IndexStore {
       dims,
       chunkCount: count,
       meanVector,
-      chunks: buffer,
+      chunkBytes: q,
+      scales,
       chunkTexts: this.options.showSummary ? chunks.map((c) => c.text) : undefined,
     };
   }
@@ -951,11 +1140,10 @@ export class IndexStore {
         "query",
         onProgress,
       );
-      const entry = this.assembleEntry(file, chunks, vectors, 0, vectors.length);
-      // Single-note path: the batched labeller still does exactly one extra embed pass
-      // for this one note (or nothing when summaries are off).
-      if (entry) await this.computeSummaryLabels([entry]);
-      return entry;
+      // LAZY LABELS: no keyphrase pass here either — the label is computed on first
+      // getSummary() demand. The entry carries chunkTexts (when summaries are on) so
+      // that demand-time pass has its source text.
+      return this.assembleEntry(file, chunks, vectors, 0, vectors.length);
     } catch (e) {
       console.warn(`[related-notes] failed to embed ${file.path}`, e);
       return null;
@@ -974,26 +1162,49 @@ export class IndexStore {
     }
     const entry = await this.embedFile(file);
     if (entry) {
-      this.entries.set(file.path, entry);
-      this.summaryCache.delete(file.path);
-      this.setProgress({ done: this.entries.size, total: this.entries.size });
-      await this.persist();
+      // Mark the vector-mutation window so a concurrent label drain can't write a
+      // manifest that disagrees with the not-yet-rewritten on-disk blob.
+      this.vectorWriteInFlight = true;
+      try {
+        this.entries.set(file.path, entry);
+        this.summaryCache.delete(file.path);
+        // Evict the stale fp32 dequant + label state so ranking/labels recompute.
+        this.dequant.delete(file.path);
+        this.labelQueue.delete(file.path);
+        this.labelDone.delete(file.path);
+        this.setProgress({ done: this.entries.size, total: this.entries.size });
+        await this.persist();
+      } finally {
+        this.vectorWriteInFlight = false;
+      }
     }
   }
 
   removeFile(path: string): void {
     this.wordCache.delete(path);
     this.summaryCache.delete(path);
+    this.dequant.delete(path);
+    this.labelQueue.delete(path);
+    this.labelDone.delete(path);
     this.ambiguousBasenames = null;
     if (this.entries.delete(path)) {
       this.setProgress({ done: this.entries.size, total: this.entries.size });
-      void this.persist();
+      // The entry set just changed but the on-disk blob hasn't yet; hold the
+      // vector-write flag across the async persist so a label drain can't slip a
+      // mismatched manifest in between (cleared whether persist resolves or throws).
+      this.vectorWriteInFlight = true;
+      void this.persist().finally(() => {
+        this.vectorWriteInFlight = false;
+      });
     }
   }
 
   renameFile(oldPath: string, file: TFile): void {
     this.wordCache.delete(oldPath);
     this.summaryCache.delete(oldPath);
+    this.dequant.delete(oldPath);
+    this.labelQueue.delete(oldPath);
+    this.labelDone.delete(oldPath);
     this.ambiguousBasenames = null;
     this.entries.delete(oldPath);
     void this.updateFile(file);
@@ -1003,17 +1214,25 @@ export class IndexStore {
     if (this.pending.size === 0) return;
     const paths = Array.from(this.pending);
     this.pending.clear();
-    for (const path of paths) {
-      const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile) {
-        const entry = await this.embedFile(file, onProgress);
-        if (entry) {
-          this.entries.set(path, entry);
-          this.summaryCache.delete(path);
+    this.vectorWriteInFlight = true;
+    try {
+      for (const path of paths) {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (file instanceof TFile) {
+          const entry = await this.embedFile(file, onProgress);
+          if (entry) {
+            this.entries.set(path, entry);
+            this.summaryCache.delete(path);
+            this.dequant.delete(path);
+            this.labelQueue.delete(path);
+            this.labelDone.delete(path);
+          }
         }
       }
+      await this.persist();
+    } finally {
+      this.vectorWriteInFlight = false;
     }
-    await this.persist();
   }
 
   // --- ranking ---------------------------------------------------------------
@@ -1096,6 +1315,13 @@ export class IndexStore {
 
   // Symmetric Bidirectional MaxSim over two notes' chunk buffers, with the title
   // chunk (index 0) weighted TITLE_WEIGHT in each per-direction weighted mean.
+  //
+  // LAZY DEQUANT: chunks live in RAM as int8; here they are expanded to fp32 through
+  // the LRU cache. dequantizeChunksRaw is byte-for-byte the old load-time dequant
+  // (same per-row L2 renorm), so directionalMax/dotRow consume IDENTICAL fp32 values
+  // and the score is bit-identical to the eager-load path — only WHEN dequant runs
+  // moved. `self` (the active note) is fetched once per rank() and stays MRU, so its
+  // dequant happens once per switch, not per candidate.
   private biMax(a: IndexEntry, b: IndexEntry): number {
     const dims = a.dims;
     if (b.dims !== dims) return 0;
@@ -1103,6 +1329,10 @@ export class IndexStore {
     // otherwise feed an empty inner loop. Today chunkCount >= 1 always (the title
     // chunk), but a future stricter chunkNote must not silently emit negatives.
     if (a.chunkCount === 0 || b.chunkCount === 0) return 0;
+
+    const aChunks = this.dequant.get(a);
+    const bChunks = this.dequant.get(b);
+
     // A title-only STUB (chunkCount === 1 — an empty note) is grounded in the other
     // note's OVERALL topic (its L2-normalized mean vector), not the single luckiest
     // chunk match. directionalMax takes a MAX, so a one-word title would otherwise
@@ -1113,12 +1343,12 @@ export class IndexStore {
     // rows are both normalized, so the dot IS a cosine; floor at 0 like the max.
     const aToB =
       a.chunkCount === 1
-        ? Math.max(0, dotRow(a.chunks, TITLE_CHUNK_INDEX, b.meanVector, dims))
-        : this.directionalMax(a.chunks, a.chunkCount, b.chunks, b.chunkCount, dims);
+        ? Math.max(0, dotRow(aChunks, TITLE_CHUNK_INDEX, b.meanVector, dims))
+        : this.directionalMax(aChunks, a.chunkCount, bChunks, b.chunkCount, dims);
     const bToA =
       b.chunkCount === 1
-        ? Math.max(0, dotRow(b.chunks, TITLE_CHUNK_INDEX, a.meanVector, dims))
-        : this.directionalMax(b.chunks, b.chunkCount, a.chunks, a.chunkCount, dims);
+        ? Math.max(0, dotRow(bChunks, TITLE_CHUNK_INDEX, a.meanVector, dims))
+        : this.directionalMax(bChunks, b.chunkCount, aChunks, a.chunkCount, dims);
     return (aToB + bToA) / 2;
   }
 
@@ -1311,28 +1541,103 @@ export class IndexStore {
     return words;
   }
 
-  // --- keyphrase summary label ----------------------------------------------
-  // Synchronous, render-hot-path-safe: just returns the PERSISTED topic label for the
-  // note (computed once at index time by computeSummaryLabels below). Cached by mtime
-  // only to memoize the defensive truncation. Returns "" when the note isn't indexed
-  // or has no label yet (caller falls back to the snippet).
+  // --- keyphrase summary label (LAZY) ---------------------------------------
+  // SYNCHRONOUS + snippet-first: never blocks the render path and never embeds on
+  // the sync path. The label is now computed on FIRST demand (not at build time):
+  //   1. mtime cache hit -> cached text.
+  //   2. label already set (this session or persisted) -> truncate + title-echo
+  //      suppress as before, cache, return.
+  //   3. label NOT set but the note has chunkTexts and summaries are on and it isn't
+  //      already attempted -> schedule a debounced async compute and return ""
+  //      immediately (the view falls back to the snippet). The drainer fills the
+  //      label and re-renders the card when ready; the next render returns it.
+  //   4. summaries off -> "" and schedule nothing.
   getSummary(file: TFile): string {
     const cached = this.summaryCache.get(file.path);
     if (cached && cached.mtime === file.stat.mtime) return cached.text;
 
     const entry = this.entries.get(file.path);
     const label = entry?.summaryLabel;
-    if (!label || label.length === 0) return "";
+    if (label !== undefined && label.length > 0) {
+      // Suppress a label that just echoes the title (incl. older basename labels) so
+      // we don't repeat the card name. Done at display time so a reload picks it up.
+      const text =
+        label.toLowerCase() === file.basename.toLowerCase()
+          ? ""
+          : truncateAtWord(label, SUMMARY_LABEL_CHARS);
+      this.summaryCache.set(file.path, { mtime: file.stat.mtime, text });
+      return text;
+    }
 
-    // Suppress a label that just echoes the title — including basename labels stored
-    // by an older index for stub notes — so we don't repeat the card name. Done at
-    // display time too so the fix lands on a reload without forcing a re-embed.
-    const text =
-      label.toLowerCase() === file.basename.toLowerCase()
-        ? ""
-        : truncateAtWord(label, SUMMARY_LABEL_CHARS);
-    this.summaryCache.set(file.path, { mtime: file.stat.mtime, text });
-    return text;
+    // Not computed yet: kick off a debounced async compute (when eligible) and return
+    // the snippet-fallback empty string immediately. We do NOT cache "" here — only a
+    // resolved (possibly empty) label is cached by the drainer / branch above — so a
+    // pending note re-checks on the next render and picks up its label once ready.
+    if (
+      label === undefined &&
+      this.options.showSummary &&
+      entry?.chunkTexts &&
+      entry.chunkTexts.length > 0
+    ) {
+      this.scheduleLabel(file.path);
+    }
+    return "";
+  }
+
+  // Queue a note for a debounced, batched label computation. Deduped against both
+  // pending (labelQueue) and already-attempted (labelDone) sets so a note whose label
+  // resolves to "" never re-queues forever.
+  private scheduleLabel(path: string): void {
+    if (this.labelQueue.has(path) || this.labelDone.has(path)) return;
+    this.labelQueue.add(path);
+    this.debouncedDrainLabels();
+  }
+
+  // Drain up to LABEL_DRAIN_BATCH queued paths: resolve them to live entries, run the
+  // EXISTING computeSummaryLabels() over the slice (one extra ONNX pass for the
+  // batch), move each from labelQueue to labelDone, persist ONLY the manifest (the
+  // vectors did not move), and re-render the affected cards. Re-arms itself while the
+  // queue is non-empty so the rest drains in further batches.
+  private async drainLabels(): Promise<void> {
+    if (this.labelQueue.size === 0) return;
+    // DEFER while a build or an incremental vector mutation is in flight: a full
+    // build() rewrites every vector (any label we computed against the old entries
+    // is stale), and a vector mutation leaves the on-disk blob out of step with the
+    // live entries — so a manifest-only write here would describe an entry set the
+    // blob doesn't match. Re-arm and let the in-flight op's full persist() carry the
+    // labels, or the next drain run them once the window closes. The queue is left
+    // intact (we computed nothing), so nothing is lost.
+    if (this.building || this.vectorWriteInFlight) {
+      this.debouncedDrainLabels();
+      return;
+    }
+    const paths = Array.from(this.labelQueue).slice(0, LABEL_DRAIN_BATCH);
+    const slice: IndexEntry[] = [];
+    for (const path of paths) {
+      const entry = this.entries.get(path);
+      // Always move out of the pending set; if the entry vanished (removed/renamed)
+      // we still mark it done so it can't wedge the queue.
+      this.labelQueue.delete(path);
+      this.labelDone.add(path);
+      if (entry) slice.push(entry);
+    }
+
+    if (slice.length > 0) {
+      try {
+        await this.computeSummaryLabels(slice);
+        // A label-only change: rewrite just the manifest (offsets/blob unchanged).
+        await this.persistManifestOnly();
+      } catch (e) {
+        console.warn("[related-notes] lazy label compute failed", e);
+      }
+      // Drop any memoized "" so getSummary re-reads the freshly-set label, then ask
+      // the view to re-render (debounced there, so a batch collapses to one pass).
+      for (const entry of slice) this.summaryCache.delete(entry.path);
+      this.renderHook?.();
+    }
+
+    // More queued? re-arm the debounced drainer for the next batch.
+    if (this.labelQueue.size > 0) this.debouncedDrainLabels();
   }
 
   // Compute tight 3–7-word TOPIC LABELS for a whole batch of freshly-assembled entries
