@@ -861,12 +861,15 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Compute device")
       .setDesc(
-        "Auto uses your GPU (WebGPU) when available and falls back to WASM (CPU) otherwise. WASM always works and needs no GPU.",
+        "Auto and WASM both run on the CPU — memory-stable and recommended. WebGPU " +
+          "can be faster per query, but the GPU backend leaks memory across the many " +
+          "embeds of a full reindex (it has spiked to tens of GB and crashed Obsidian), " +
+          "so only pin it if you accept that and have a small vault.",
       )
       .addDropdown((d) =>
         d
-          .addOption("auto", "Auto (recommended)")
-          .addOption("webgpu", "WebGPU (GPU)")
+          .addOption("auto", "Auto · WASM/CPU (recommended)")
+          .addOption("webgpu", "WebGPU/GPU (experimental, high memory)")
           .addOption("wasm", "WASM (CPU)")
           .setValue(this.plugin.settings.device)
           .onChange(async (v) => {

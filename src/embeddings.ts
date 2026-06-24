@@ -177,18 +177,21 @@ export class EmbeddingEngine {
       // The web runtime supports exactly "webgpu" (when an adapter exists) and
       // "wasm". Every order ends in "wasm" — the always-available CPU path — so
       // init can never dead-end on an invalid device.
+      //
+      // "auto" deliberately uses WASM, NOT WebGPU. onnxruntime-web's WebGPU backend
+      // accumulates GPU buffers across the many embed() calls of a full (re)index;
+      // on a unified-memory Mac that IS system RAM, and a reindex ballooned to ~70GB
+      // and crashed Obsidian. WASM is memory-stable for batch embedding and plenty
+      // fast for note-sized inputs. WebGPU remains available only as an EXPLICIT pin
+      // for users who accept that cost (and mainly want single-query speed).
       let order: Array<"webgpu" | "wasm">;
-      if (this.devicePref === "wasm") {
-        order = ["wasm"];
-      } else if (this.devicePref === "webgpu") {
+      if (this.devicePref === "webgpu") {
         // Honour the explicit pin, but still fall back to wasm if the adapter or
         // the webgpu session fails to come up.
         order = ["webgpu", "wasm"];
       } else {
-        // "auto": only try WebGPU when a real adapter is present, else wasm.
-        order = (await EmbeddingEngine.webgpuAvailable())
-          ? ["webgpu", "wasm"]
-          : ["wasm"];
+        // "auto" and "wasm" both resolve to the memory-stable WASM backend.
+        order = ["wasm"];
       }
 
       let lastErr: unknown;
