@@ -263,10 +263,11 @@ export default class RelatedNotesPlugin extends Plugin {
     }
   }
 
-  // Full rebuild from the command / refresh button. Re-embeds notes whose mtime
-  // changed and reuses the rest, so it is cheap when little has changed.
+  // Manual "Rebuild index" command/button: FORCE a full re-embed of every note
+  // (not the cheap mtime-reuse build), so it always reflects the current model and
+  // settings instead of finishing instantly with the old vectors.
   async rebuildIndex(): Promise<void> {
-    await this.store.build();
+    await this.store.build(undefined, true);
     this.getView()?.requestRender();
   }
 

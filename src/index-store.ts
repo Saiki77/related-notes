@@ -262,7 +262,10 @@ export class IndexStore {
   // If every candidate fails to embed (e.g. the model never loaded — CDN blocked,
   // offline, wasm mismatch) the status flips to "error" with a Notice, instead of
   // silently finishing "ready" with zero vectors and degrading to keyword mode.
-  async build(onProgress?: ProgressCallback): Promise<void> {
+  // `force` re-embeds every note even if its mtime is unchanged — used by the
+  // manual "Rebuild index" command so it is never a silent no-op (a model/setting
+  // change should be reflected even though the files themselves didn't change).
+  async build(onProgress?: ProgressCallback, force = false): Promise<void> {
     if (this.building) return;
     this.building = true;
     try {
@@ -285,7 +288,7 @@ export class IndexStore {
           const toEmbed: { file: TFile; text: string }[] = [];
           for (const file of batch) {
             const existing = this.entries.get(file.path);
-            if (existing && existing.mtime === file.stat.mtime) {
+            if (!force && existing && existing.mtime === file.stat.mtime) {
               next.set(file.path, existing);
               continue;
             }
