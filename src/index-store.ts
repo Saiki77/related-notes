@@ -518,6 +518,14 @@ export class IndexStore {
   // carry the labels.
   private vectorWriteInFlight = false;
 
+  // Serializes ALL persistence. persist(), persistManifestOnly(), and every
+  // incremental save path funnel through persistSerial(), which chains onto this
+  // promise so only ONE write+swap sequence runs at a time. Previously a label
+  // drain's persistManifestOnly() could race a concurrent persist(): both wrote the
+  // SAME index.json.tmp, the first swapInto renamed it away, and the second
+  // swapInto's rename(tmp,dest) threw ENOENT. Chaining eliminates the shared-tmp race.
+  private persistChain: Promise<void> = Promise.resolve();
+
   // Scale-aware effective chunk cap, set at the start of build() from the vault
   // size. Undefined until the first build, where the getter falls back to the base.
   private effectiveMaxChunks: number | undefined;
@@ -800,11 +808,33 @@ export class IndexStore {
     return Array.from(this.entries.values());
   }
 
+  // Run a persistence operation under the single-writer mutex. Every persist path
+  // (full persist + manifest-only + any incremental save) chains here, so two writes
+  // can never interleave their write/swap on the shared .tmp paths. Failures are
+  // logged (never thrown) so a persist error is not an UNCAUGHT promise rejection;
+  // the chain is kept alive (we swallow into .catch) so one failure doesn't poison
+  // every later write.
+  private persistSerial(op: () => Promise<void>): Promise<void> {
+    const run = this.persistChain.then(op).catch((e: unknown) => {
+      console.warn("[related-notes] persist failed", e);
+    });
+    // Advance the chain to this run's settlement (already caught above, so the chain
+    // never holds a rejection).
+    this.persistChain = run;
+    return run;
+  }
+
+  // Full persist (mutex-guarded). The actual write+swap lives in persistFull().
+  private persist(): Promise<void> {
+    return this.persistSerial(() => this.persistFull());
+  }
+
   // Full persist: manifest + blob, crash-safe. Writes both .tmp files, then renames
   // the BLOB into place BEFORE the manifest, so a crash never leaves a manifest
   // pointing at a missing/half-written blob (the worst case is a committed blob with
   // the old manifest — load() validates totalBytes and rebuilds if they skew).
-  private async persist(): Promise<void> {
+  // ALWAYS call via persist() so it runs under the persistChain mutex.
+  private async persistFull(): Promise<void> {
     // Empty vault (everything excluded, or a brand-new vault): there is nothing to
     // rank and no dims to record. Writing a dims=0 / 0-byte index would only make
     // load()'s `!header.dims` gate treat it as stale and rebuild every startup, so
@@ -840,18 +870,30 @@ export class IndexStore {
   // it first. The new bytes are already fully written to `tmp`, so the only failure
   // window is the brief remove→rename gap; load()'s header/totalBytes validation
   // detects and self-heals any resulting skew into a clean rebuild.
+  //
+  // The persistChain mutex now guarantees no two swaps race on the shared .tmp paths;
+  // as defence-in-depth we also no-op gracefully if `tmp` is already gone (e.g. a
+  // prior swap consumed it), so a stale call can never throw the old ENOENT.
   private async swapInto(tmp: string, dest: string): Promise<void> {
     const adapter = this.app.vault.adapter;
+    if (!(await adapter.exists(tmp))) return;
     if (await adapter.exists(dest)) await adapter.remove(dest);
     await adapter.rename(tmp, dest);
+  }
+
+  // MANIFEST-ONLY persist (mutex-guarded). The actual write+swap lives in
+  // persistManifestOnlyInner().
+  private persistManifestOnly(): Promise<void> {
+    return this.persistSerial(() => this.persistManifestOnlyInner());
   }
 
   // MANIFEST-ONLY persist for a label-only change. The vectors did not move, so the
   // blob (and every byte offset / totalBytes) is unchanged — rewriting just the
   // manifest is consistent with the on-disk blob and avoids a multi-MB rewrite per
   // label batch. ONLY the label drainer may call this; any vector mutation must go
-  // through full persist().
-  private async persistManifestOnly(): Promise<void> {
+  // through full persist(). ALWAYS call via persistManifestOnly() so it runs under
+  // the persistChain mutex (else it could race a full persist on index.json.tmp).
+  private async persistManifestOnlyInner(): Promise<void> {
     if (this.entries.size === 0) return;
     const dims = this.firstDims();
     const keepText = this.options.showSummary;
@@ -1603,8 +1645,26 @@ export class IndexStore {
   // resolves to "" never re-queues forever.
   private scheduleLabel(path: string): void {
     if (this.labelQueue.has(path) || this.labelDone.has(path)) return;
+    // NEVER kick label work during bootstrap (load) or a (re)index. getSummary() is
+    // called from renderCard during the initial render that load()/setProgress drives,
+    // so without this gate the render -> getSummary -> drainLabels -> embedBatch ->
+    // model-init chain fires mid-bootstrap and compounds the freeze. The card still
+    // renders immediately with its snippet fallback; once status is ready/idle a later
+    // render re-demands the label and it computes normally. We do NOT add to the queue
+    // here (so it isn't silently lost-then-marked-done) — the note re-schedules on the
+    // next render once labels are allowed.
+    if (!this.labelsAllowed()) return;
     this.labelQueue.add(path);
     this.debouncedDrainLabels();
+  }
+
+  // Labels may compute only when the index is settled: not building, not loading, and
+  // no build/vector-mutation in flight. During "building"/"loading" the model session
+  // and embed passes must stay off the render path (see scheduleLabel/drainLabels).
+  private labelsAllowed(): boolean {
+    if (this.building || this.vectorWriteInFlight) return false;
+    const status = this.progress.status;
+    return status !== "building" && status !== "loading";
   }
 
   // Drain up to LABEL_DRAIN_BATCH queued paths: resolve them to live entries, run the
@@ -1621,7 +1681,10 @@ export class IndexStore {
     // blob doesn't match. Re-arm and let the in-flight op's full persist() carry the
     // labels, or the next drain run them once the window closes. The queue is left
     // intact (we computed nothing), so nothing is lost.
-    if (this.building || this.vectorWriteInFlight) {
+    // Also DEFER while the index is loading (bootstrap) — the initial render that
+    // drives load()/setProgress would otherwise trigger model-session creation +
+    // embeds during startup. labelsAllowed() folds in building/vectorWriteInFlight too.
+    if (!this.labelsAllowed()) {
       this.debouncedDrainLabels();
       return;
     }

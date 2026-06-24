@@ -119,6 +119,21 @@ function modelNeedsPrefix(modelId: string): boolean {
 
 export type EmbedKind = "query" | "passage";
 
+// embedBatch processes its inputs in SUB-BATCHES of this many texts, awaiting a
+// macrotask yield between sub-batches so the renderer can paint/handle input
+// instead of being blocked by one long synchronous WASM forward pass over a whole
+// outer batch (~130+ chunk texts froze the app). A sub-batch of ~12 keeps each
+// pipe() call short while staying large enough for ORT batch throughput. This only
+// changes WHEN pipe() runs — never the order of the returned rows.
+const EMBED_SUB_BATCH = 12;
+
+// Yield a real macrotask so the renderer paints + processes input between embed
+// sub-batches. Local to embeddings.ts (no import from index-store): window.setTimeout(0)
+// is the documented "yield a macrotask", and the window-scoped timer keeps
+// popout-window compatibility per the obsidianmd lint rule.
+const yieldToUI = (): Promise<void> =>
+  new Promise<void>((r) => window.setTimeout(r, 0));
+
 // One feature-extraction engine, bound to a single model id. The plugin holds one
 // instance and rebuilds it when the model id or device preference changes.
 export class EmbeddingEngine {
@@ -243,17 +258,31 @@ export class EmbeddingEngine {
     const pipe = await this.init(onProgress);
     const prefix = modelNeedsPrefix(this.modelId);
     const inputs = prefix ? texts.map((t) => `${kind}: ${t}`) : texts;
-    const out = await pipe(inputs, { pooling: "mean", normalize: true });
-    const data = out.data as Float32Array;
-    const n = texts.length;
-    // dims is [N, D]; derive D defensively from the flat length when shapes drift.
-    const dims =
-      Array.isArray(out.dims) && out.dims.length === 2
-        ? out.dims[1]
-        : Math.floor(data.length / n);
+
+    // SUB-BATCH the forward passes so the main thread is never blocked for long: one
+    // pipe() call over a whole outer batch is a single uninterruptible synchronous
+    // WASM pass (~seconds for 130+ chunks) that froze Obsidian. We run pipe() per
+    // EMBED_SUB_BATCH slice and yield a macrotask BETWEEN slices so the renderer can
+    // paint/handle input. Rows are concatenated IN INPUT ORDER, so the returned
+    // Float32Array[] is byte-identical to the old whole-batch result — build()'s
+    // offset regrouping and ranking output are unchanged. A single input (or one
+    // sub-batch's worth) takes exactly one pass with NO extra yield, so embed() and a
+    // 1-text batch behave exactly as before.
     const result: Float32Array[] = [];
-    for (let i = 0; i < n; i++) {
-      result.push(new Float32Array(data.subarray(i * dims, (i + 1) * dims)));
+    for (let start = 0; start < inputs.length; start += EMBED_SUB_BATCH) {
+      if (start > 0) await yieldToUI();
+      const slice = inputs.slice(start, start + EMBED_SUB_BATCH);
+      const out = await pipe(slice, { pooling: "mean", normalize: true });
+      const data = out.data as Float32Array;
+      const n = slice.length;
+      // dims is [N, D]; derive D defensively from the flat length when shapes drift.
+      const dims =
+        Array.isArray(out.dims) && out.dims.length === 2
+          ? out.dims[1]
+          : Math.floor(data.length / n);
+      for (let i = 0; i < n; i++) {
+        result.push(new Float32Array(data.subarray(i * dims, (i + 1) * dims)));
+      }
     }
     return result;
   }
