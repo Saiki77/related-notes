@@ -1377,25 +1377,30 @@ export class IndexStore {
   }
 
   // Does a glow for `targetPath` make sense in the active note's CONTEXT? (Used by the
-  // inline glow + Link-all + auto-link so a title that is also a common word only
-  // links where it fits.) Two paths because an EMPTY target carries no topic to judge:
-  //   - Content-rich target: gate by centered (topical) similarity to the active note.
-  //   - Stub target: glow only if the active note already LINKS to it — the title alone
-  //     (often an ambiguous word) isn't enough to infer the sense.
-  // Returns true (don't gate) when either note isn't indexed yet.
+  // inline glow + Link-all + auto-link so a title that is also a common word only links
+  // where it fits.) We gate ONLY the clear false positive: a CONTENT-RICH target that
+  // is both off-topic (low centered similarity) AND not structurally tied — e.g. a math
+  // "Analysis" note (full of calculus) mentioned in a security note. Everything else
+  // glows: empty stubs (concept placeholders to link/build out — they carry no body to
+  // judge, and suppressing them left notes with NOTHING highlighted), on-topic notes,
+  // and any note linked/sharing a tag. Returns true when a note isn't indexed yet.
   glowAllowed(activePath: string, targetPath: string): boolean {
     const a = this.entries.get(activePath);
     const b = this.entries.get(targetPath);
     if (!a || !b) return true;
-    if (b.chunkCount > 1 && b.dims === a.dims) {
-      return (
-        cosineSimilarity(this.centeredMean(a), this.centeredMean(b)) >=
-        GLOW_CONTEXT_FLOOR
-      );
-    }
-    // Stub target: no topic to judge, so glow only when there's an explicit structural
-    // tie — a link in EITHER direction or a shared tag. (An isolated empty stub like a
-    // bare "Analysis" note has none, so it won't glow off-topic.)
+    // Only a content-rich target can be confidently judged off-topic.
+    if (b.chunkCount <= 1 || b.dims !== a.dims) return true;
+    // Linked / shared-tag notes are relevant by the user's own connection — always glow.
+    if (this.structurallyTied(activePath, targetPath)) return true;
+    return (
+      cosineSimilarity(this.centeredMean(a), this.centeredMean(b)) >=
+      GLOW_CONTEXT_FLOOR
+    );
+  }
+
+  // An explicit structural tie between two notes: a resolved link in either direction,
+  // or a shared tag.
+  private structurallyTied(activePath: string, targetPath: string): boolean {
     const mc = this.app.metadataCache;
     const fwd = mc.resolvedLinks[activePath];
     if (fwd && fwd[targetPath]) return true;
@@ -1403,17 +1408,15 @@ export class IndexStore {
     if (back && back[activePath]) return true;
     const ac = mc.getCache(activePath);
     const bc = mc.getCache(targetPath);
-    if (ac && bc) {
-      const at = new Set<string>();
-      for (const t of ac.tags ?? []) at.add(normalizeTag(t.tag));
-      if (ac.frontmatter?.tags) addFrontmatterTags(at, ac.frontmatter.tags);
-      if (at.size > 0) {
-        const bt = new Set<string>();
-        for (const t of bc.tags ?? []) bt.add(normalizeTag(t.tag));
-        if (bc.frontmatter?.tags) addFrontmatterTags(bt, bc.frontmatter.tags);
-        for (const t of bt) if (at.has(t)) return true;
-      }
-    }
+    if (!ac || !bc) return false;
+    const at = new Set<string>();
+    for (const t of ac.tags ?? []) at.add(normalizeTag(t.tag));
+    if (ac.frontmatter?.tags) addFrontmatterTags(at, ac.frontmatter.tags);
+    if (at.size === 0) return false;
+    const bt = new Set<string>();
+    for (const t of bc.tags ?? []) bt.add(normalizeTag(t.tag));
+    if (bc.frontmatter?.tags) addFrontmatterTags(bt, bc.frontmatter.tags);
+    for (const t of bt) if (at.has(t)) return true;
     return false;
   }
 
