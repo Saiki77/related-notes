@@ -55,6 +55,19 @@ const MIN_WINDOW_WORDS = 10;
 const TITLE_CHUNK_INDEX = 0;
 const TITLE_WEIGHT = 2;
 
+// CONTENT CONFIDENCE. Short/empty notes embed to a non-distinctive vector that sits
+// near the corpus centroid (embedding-space anisotropy), so they score a moderate
+// ~0.5 cosine against EVERY note — e.g. a math stub "Ableiten" surfacing at 52% under
+// an unrelated security essay. We have low confidence in that similarity, so the
+// SEMANTIC score is scaled by how much real BODY text the note has: full trust at
+// CONFIDENT_BODY_CHARS, down to MIN_CONTENT_CONFIDENCE for a title-only note. Applied
+// to the semantic part ONLY, so a directly-linked / shared-tag stub still surfaces via
+// its structural boost. (When chunkTexts aren't persisted — summaries off — body size
+// is approximated from the body chunk count.)
+const CONFIDENT_BODY_CHARS = 220;
+const MIN_CONTENT_CONFIDENCE = 0.4;
+const APPROX_CHARS_PER_CHUNK = 110;
+
 // Stage-1 -> Stage-2 funnel: keep at least this many coarse candidates (and at
 // least topK*4) for the fine re-rank. Overridable via options.shortlistSize.
 const DEFAULT_SHORTLIST = 60;
@@ -1341,9 +1354,13 @@ export class IndexStore {
       const file = this.app.vault.getAbstractFileByPath(entry.path);
       if (!(file instanceof TFile)) continue;
 
-      const semantic = this.biMax(self, entry);
-
       const signals = this.structuralSignals(activeStruct, file, entry);
+      // Scale the semantic similarity by the candidate's content confidence so a
+      // near-empty note can't ride the embedding-space baseline to a spuriously high
+      // rank. A DIRECTLY LINKED note is relevant by the user's own connection, so it
+      // keeps full semantic weight; only purely-discovered notes get the penalty.
+      const confidence = signals.directLink ? 1 : this.contentConfidence(entry);
+      const semantic = this.biMax(self, entry) * confidence;
       // signals.raw is already clamped to [0,1], so raw * bMax <= bMax; no extra cap.
       const boost = bMax > 0 ? signals.raw * bMax : 0;
       const finalScore = Math.min(1, semantic + boost);
@@ -1362,6 +1379,25 @@ export class IndexStore {
 
     results.sort((a, b) => b.score - a.score);
     return results.slice(0, this.options.topK);
+  }
+
+  // Confidence in a note's semantic score, from how much BODY text it carries (see
+  // CONFIDENT_BODY_CHARS). 1.0 for a note with a real paragraph, down to
+  // MIN_CONTENT_CONFIDENCE for a title-only stub — which keeps near-empty notes from
+  // riding the embedding-space baseline to a spurious high rank.
+  private contentConfidence(entry: IndexEntry): number {
+    let bodyChars: number;
+    if (entry.chunkTexts && entry.chunkTexts.length > 0) {
+      bodyChars = 0;
+      for (let i = 0; i < entry.chunkTexts.length; i++) {
+        if (i !== TITLE_CHUNK_INDEX) bodyChars += entry.chunkTexts[i].length;
+      }
+    } else {
+      // Summaries off → no persisted text; approximate from the body chunk count.
+      bodyChars = Math.max(0, entry.chunkCount - 1) * APPROX_CHARS_PER_CHUNK;
+    }
+    const t = Math.min(1, bodyChars / CONFIDENT_BODY_CHARS);
+    return MIN_CONTENT_CONFIDENCE + (1 - MIN_CONTENT_CONFIDENCE) * t;
   }
 
   // Symmetric Bidirectional MaxSim over two notes' chunk buffers, with the title
