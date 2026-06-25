@@ -381,37 +381,46 @@ export const glowPlugin = ViewPlugin.fromClass(
     decorations: (v) => v.decorations,
     eventHandlers: {
       mousedown(this: { decorations: DecorationSet }, e: MouseEvent, view: EditorView) {
-        const target = e.target as HTMLElement | null;
-        if (!target || !target.classList.contains(GLOW_CLASS)) return false;
-        const insert = glowBridge.insert;
-        if (!insert) return false;
+        if (e.button !== 0) return false; // left-click only
+        const titleIndex = glowBridge.titleIndex;
+        if (!titleIndex) return false;
 
-        // Map the clicked DOM node to a document offset, then find the glow range
-        // covering it by iterating the decoration set.
-        let pos: number;
-        try {
-          pos = view.posAtDOM(target);
-        } catch {
-          return false;
-        }
+        // Resolve the click to a document offset from POINTER COORDINATES, not from
+        // e.target. In live preview the glow <span> is routinely wrapped by (or wraps)
+        // other CM/Obsidian spans, so the clicked node is usually a CHILD that does NOT
+        // carry the glow class — the old classList check on e.target failed there and
+        // the click silently did nothing. posAtCoords is robust to that nesting.
+        const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+        if (pos === null) return false;
+
+        // Is that offset inside a glow range? (between() yields ranges overlapping the
+        // point; require pos strictly inside [from, to) so a click just past the word
+        // doesn't convert it.)
         let found: { from: number; to: number } | null = null;
-        this.decorations.between(
-          Math.max(0, pos - 1),
-          pos + 1,
-          (from, to) => {
-            if (from <= pos && pos <= to) {
-              found = { from, to };
-              return false; // stop iterating
-            }
-            return undefined;
-          },
-        );
+        this.decorations.between(pos, pos, (from, to) => {
+          if (from <= pos && pos < to) {
+            found = { from, to };
+            return false; // stop iterating
+          }
+          return undefined;
+        });
         if (!found) return false;
-
         const range = found as { from: number; to: number };
+
+        // Re-validate against the live doc (it may have changed since buildGlow) and
+        // resolve the target, then apply the wikilink with the CM6 view DIRECTLY —
+        // same offsets, no Obsidian-editor round-trip (offsetToPos translation + an
+        // active-editor lookup were extra silent-failure points).
         const surface = view.state.doc.sliceString(range.from, range.to);
-        insert({ from: range.from, to: range.to, surface });
+        const resolved = titleIndex.resolve(surface);
+        if (!resolved) return false;
+        const link = buildWikiLink(resolved.file, surface, titleIndex);
+
         e.preventDefault();
+        view.dispatch({
+          changes: { from: range.from, to: range.to, insert: link },
+          selection: { anchor: range.from + link.length },
+        });
         return true;
       },
     },
