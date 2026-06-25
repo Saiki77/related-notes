@@ -53,6 +53,9 @@ export interface RelatedNotesSettings {
   device: DevicePref;
   topK: number;
   minSimilarity: number;
+  // One-time flag: when false, onload lowers a pre-1.8.0 minSimilarity onto the new
+  // mean-centered (floor-free) score scale, then sets it true.
+  centeredScaleMigrated: boolean;
   embedCharLimit: number;
   excludeFolders: string; // comma- or newline-separated folder paths
   showSnippet: boolean;
@@ -85,9 +88,11 @@ export const DEFAULT_SETTINGS: RelatedNotesSettings = {
   modelId: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
   device: "auto",
   topK: 12,
-  // Chunk-level BiMax scores land in a higher, less-spread range than the old
-  // whole-note centroid cosines, so the floor is re-centered up from 0.3.
-  minSimilarity: 0.45,
+  // Mean-centering (1.8.0) removes the anisotropy noise floor, so scores sit on a
+  // lower, floor-free scale where ~0.2 cleanly separates topically-related notes from
+  // the now-near-zero unrelated ones. (Pre-1.8.0 vaults are migrated down on load.)
+  minSimilarity: 0.2,
+  centeredScaleMigrated: false,
   embedCharLimit: 1500,
   excludeFolders: "",
   showSnippet: true,
@@ -134,7 +139,7 @@ const PROFILES: Record<ProfileName, Partial<RelatedNotesSettings>> = {
     modelId: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
     device: "auto",
     topK: 8,
-    minSimilarity: 0.45,
+    minSimilarity: 0.2,
     embedCharLimit: 1200,
     showSnippet: true,
     chunking: true,
@@ -146,7 +151,7 @@ const PROFILES: Record<ProfileName, Partial<RelatedNotesSettings>> = {
     modelId: "Xenova/paraphrase-multilingual-mpnet-base-v2",
     device: "auto",
     topK: 20,
-    minSimilarity: 0.35,
+    minSimilarity: 0.2,
     embedCharLimit: 3500,
     showSnippet: true,
     chunking: true,
@@ -208,6 +213,16 @@ export default class RelatedNotesPlugin extends Plugin {
   async onload(): Promise<void> {
     const saved = (await this.loadData()) as Partial<RelatedNotesSettings> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
+
+    // One-time recalibration for 1.8.0 mean-centering: the old scores carried an
+    // anisotropy "noise floor" (~0.4 for unrelated notes), so users had minSimilarity
+    // tuned up around there. Centering removes that floor, so a 0.4 cutoff now hides
+    // almost everything — lower it onto the new scale once (only ever lowers it).
+    if (!this.settings.centeredScaleMigrated) {
+      this.settings.minSimilarity = Math.min(this.settings.minSimilarity, 0.2);
+      this.settings.centeredScaleMigrated = true;
+      await this.saveData(this.settings);
+    }
 
     // Point onnxruntime-web at the plugin's self-hosted wasm folder so the .wasm
     // matches the bundled glue exactly and the plugin works offline. If the folder
@@ -902,7 +917,7 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
       const setting = new Setting(containerEl)
         .setName("Minimum similarity")
         .setDesc(
-          "Hide notes below this similarity (0–1). Chunk-level matching scores higher and tighter than before, so the default floor moved up — around 0.45 is a good starting point. Lower shows more, looser matches.",
+          "Hide notes below this topical-similarity score (0–1). Scores are mean-centered to remove the embedding noise floor, so unrelated notes sit near 0 and only genuinely on-topic notes score high — about 0.2 cleanly separates them. Raise it for a tighter, more focused list; lower it to show weaker matches.",
         );
       const fmt = (v: number) => v.toFixed(2);
       const valueEl = setting.controlEl.createSpan({

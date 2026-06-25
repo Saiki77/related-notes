@@ -70,6 +70,95 @@ export function dotRow(
 }
 
 // =============================================================================
+// Mean-centering (anisotropy correction)
+// =============================================================================
+// Sentence-embedding spaces are anisotropic: every note shares a common direction,
+// so even unrelated notes score a high baseline cosine (measured ~0.49 "noise floor"
+// on a real vault). Subtracting the corpus CENTROID (the shared direction) from each
+// vector before comparing pushes unrelated notes toward 0/negative while keeping
+// genuinely-related notes high — so similarity reflects TOPIC, not the shared
+// baseline. (Measured live: Bio-vs-security 0.52 -> -0.06, the real match 0.86 -> 0.79.)
+// Simple common-mean removal is the SAFE form of isotropy correction — on an already-
+// isotropic corpus the centroid norm is tiny, so it's a near-no-op, never harmful.
+
+// The corpus centroid: the L2-normalized mean of all note mean-vectors. Returns null
+// for an empty corpus. O(n*dims), cheap to recompute as the vault changes.
+export function computeCentroid(
+  means: Float32Array[],
+  dims: number,
+): Float32Array | null {
+  if (means.length === 0) return null;
+  const c = new Float32Array(dims);
+  let used = 0;
+  for (const m of means) {
+    if (m.length !== dims) continue;
+    for (let i = 0; i < dims; i++) c[i] += m[i];
+    used++;
+  }
+  if (used === 0) return null;
+  let sumSq = 0;
+  for (let i = 0; i < dims; i++) {
+    c[i] /= used;
+    sumSq += c[i] * c[i];
+  }
+  const norm = Math.sqrt(sumSq);
+  if (norm === 0) return null;
+  const inv = 1 / norm;
+  for (let i = 0; i < dims; i++) c[i] *= inv;
+  return c;
+}
+
+// Remove the centroid direction from a unit vector and re-L2-normalize, so the dot of
+// two centered vectors is the centered cosine. Returns a new array.
+export function centerVector(
+  v: Float32Array,
+  centroid: Float32Array,
+  dims: number,
+): Float32Array {
+  let proj = 0;
+  for (let i = 0; i < dims; i++) proj += v[i] * centroid[i];
+  const out = new Float32Array(dims);
+  let sumSq = 0;
+  for (let i = 0; i < dims; i++) {
+    const x = v[i] - proj * centroid[i];
+    out[i] = x;
+    sumSq += x * x;
+  }
+  const norm = Math.sqrt(sumSq);
+  if (norm > 0) {
+    const inv = 1 / norm;
+    for (let i = 0; i < dims; i++) out[i] *= inv;
+  }
+  return out;
+}
+
+// In-place centering of every row of a contiguous chunk buffer (count rows of dims):
+// each row gets the centroid direction removed and is re-L2-normalized. Mutates buf.
+export function centerChunksInPlace(
+  buf: Float32Array,
+  count: number,
+  dims: number,
+  centroid: Float32Array,
+): void {
+  for (let r = 0; r < count; r++) {
+    const off = r * dims;
+    let proj = 0;
+    for (let i = 0; i < dims; i++) proj += buf[off + i] * centroid[i];
+    let sumSq = 0;
+    for (let i = 0; i < dims; i++) {
+      const x = buf[off + i] - proj * centroid[i];
+      buf[off + i] = x;
+      sumSq += x * x;
+    }
+    const norm = Math.sqrt(sumSq);
+    if (norm > 0) {
+      const inv = 1 / norm;
+      for (let i = 0; i < dims; i++) buf[off + i] *= inv;
+    }
+  }
+}
+
+// =============================================================================
 // int8 quantization (chunk block only — the mean stays fp32)
 // =============================================================================
 

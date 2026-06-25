@@ -65,7 +65,9 @@ restarts and only changed notes are re-embedded.
   Pin **WebGPU** or **WASM** to force one. Both are memory-stable; switching
   re-downloads the model for that backend.
 - **Number of results** — how many cards to show.
-- **Minimum similarity** — hide matches below this cosine score (0–1).
+- **Minimum similarity** — hide matches below this topical-similarity score (0–1).
+  Scores are mean-centered (the embedding noise floor is removed), so unrelated notes
+  sit near 0 and ~0.2 cleanly separates on-topic notes. Raise for a tighter list.
 - **Embed character limit** — how much of each note's body to embed after the title.
 - **Excluded folders** — folders to leave out of the index (and everything beneath
   them), one per line or comma-separated.

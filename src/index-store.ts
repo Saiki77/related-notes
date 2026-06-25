@@ -5,6 +5,9 @@ import {
   cosineSimilarity,
   meanOf,
   dotRow,
+  computeCentroid,
+  centerVector,
+  centerChunksInPlace,
   quantizeChunksRaw,
   dequantizeChunksRaw,
   serializeIndex,
@@ -80,6 +83,10 @@ const DEFAULT_SHORTLIST = 60;
 // mean blurs toward a centroid, yet whose chunks match strongly). Filtering on the
 // unreliable mean here would re-introduce the very failure we fixed.
 const COARSE_FLOOR = 0.2;
+// When mean-centering is active the cosine distribution is shifted down (unrelated
+// notes go to ~0/negative, related stay positive), so the coarse floor is lower and
+// slightly negative to preserve recall — the real cut is the Stage-2 minSimilarity.
+const COARSE_FLOOR_CENTERED = -0.1;
 
 // Hybrid structural boost weights and cap. boost is added to the semantic score
 // AFTER it is scaled into [0, B_MAX]; B_MAX itself comes from options
@@ -396,9 +403,20 @@ class DequantCache {
   // One-time guard so a genuine length/scale mismatch (the null path below) is
   // observable in the console rather than silently scoring the note 0 forever.
   private warnedNull = false;
+  // Corpus centroid (anisotropy correction). When set, dequantized chunk rows are
+  // mean-centered + re-normalized before caching, so BiMax consumes centered vectors.
+  private centroid: Float32Array | null = null;
 
   constructor(cap: number) {
     this.cap = Math.max(DEQUANT_CACHE_FLOOR, cap);
+  }
+
+  // Set the centroid used to center chunks. A change invalidates the cache so no
+  // stale raw/old-centroid buffers survive (cheap: chunks re-dequant on next demand).
+  setCentroid(centroid: Float32Array | null): void {
+    if (this.centroid === centroid) return;
+    this.centroid = centroid;
+    this.cache.clear();
   }
 
   // Return the fp32 chunk buffer for an entry, dequantizing + caching on a miss.
@@ -426,6 +444,11 @@ class DequantCache {
       );
     }
     const f = dequantized ?? new Float32Array(entry.chunkCount * entry.dims);
+    // Mean-center the rows (anisotropy correction) so BiMax scores topical, not
+    // baseline, similarity. No-op when no centroid is set (e.g. an empty corpus).
+    if (this.centroid && dequantized && this.centroid.length === entry.dims) {
+      centerChunksInPlace(f, entry.chunkCount, entry.dims, this.centroid);
+    }
     this.cache.set(entry.path, f);
     if (this.cache.size > this.cap) {
       const lru = this.cache.keys().next().value;
@@ -533,6 +556,13 @@ export class IndexStore {
   // SAME index.json.tmp, the first swapInto renamed it away, and the second
   // swapInto's rename(tmp,dest) threw ENOENT. Chaining eliminates the shared-tmp race.
   private persistChain: Promise<void> = Promise.resolve();
+
+  // Anisotropy correction: the corpus centroid + per-note CENTERED mean vectors,
+  // recomputed whenever `entries` changes (see recomputeCentroid). The chunk-level
+  // centering lives in DequantCache (fed the same centroid). null = centering off
+  // (empty corpus), in which case the raw vectors are used unchanged.
+  private centroid: Float32Array | null = null;
+  private centeredMeans = new Map<string, Float32Array>();
 
   // Scale-aware effective chunk cap, set at the start of build() from the vault
   // size. Undefined until the first build, where the getter falls back to the base.
@@ -776,6 +806,7 @@ export class IndexStore {
       }
       this.entries = loaded;
       this.dequant.clear();
+      this.recomputeCentroid();
       this.labelQueue.clear();
       this.labelDone.clear();
       this.setProgress({ status: "ready", done: loaded.size, total: loaded.size });
@@ -1121,6 +1152,7 @@ export class IndexStore {
       }
 
       this.entries = next;
+      this.recomputeCentroid();
       this.setProgress({ status: "ready", done, total });
       await this.persist();
       await this.flushPending(onProgress);
@@ -1236,6 +1268,9 @@ export class IndexStore {
         this.dequant.delete(file.path);
         this.labelQueue.delete(file.path);
         this.labelDone.delete(file.path);
+        // The corpus shifted by one note; refresh the centroid + centered means
+        // (also resets the dequant cache so chunks re-center against the new centroid).
+        this.recomputeCentroid();
         this.setProgress({ done: this.entries.size, total: this.entries.size });
         await this.persist();
       } finally {
@@ -1252,6 +1287,7 @@ export class IndexStore {
     this.labelDone.delete(path);
     this.ambiguousBasenames = null;
     if (this.entries.delete(path)) {
+      this.recomputeCentroid();
       this.setProgress({ done: this.entries.size, total: this.entries.size });
       // The entry set just changed but the on-disk blob hasn't yet; hold the
       // vector-write flag across the async persist so a label drain can't slip a
@@ -1299,6 +1335,43 @@ export class IndexStore {
     }
   }
 
+  // Recompute the corpus centroid + per-note centered means and feed the centroid to
+  // the dequant cache (which centers chunks). Call after ANY change to `entries`.
+  // Cheap: O(n*dims). On an empty/already-isotropic corpus it is a near-no-op.
+  private recomputeCentroid(): void {
+    const entries = Array.from(this.entries.values());
+    if (entries.length === 0) {
+      this.centroid = null;
+      this.centeredMeans.clear();
+      this.dequant.setCentroid(null);
+      return;
+    }
+    const dims = entries[0].dims;
+    const centroid = computeCentroid(
+      entries.filter((e) => e.dims === dims).map((e) => e.meanVector),
+      dims,
+    );
+    this.centroid = centroid;
+    this.centeredMeans.clear();
+    if (centroid) {
+      for (const e of entries) {
+        if (e.dims === dims && e.meanVector.length === dims) {
+          this.centeredMeans.set(
+            e.path,
+            centerVector(e.meanVector, centroid, dims),
+          );
+        }
+      }
+    }
+    this.dequant.setCentroid(centroid);
+  }
+
+  // The centered mean for a note — falls back to its raw mean when centering is off or
+  // not yet computed. Used by Stage 1 and the stub-grounding branch of biMax().
+  private centeredMean(entry: IndexEntry): Float32Array {
+    return this.centeredMeans.get(entry.path) ?? entry.meanVector;
+  }
+
   // --- ranking ---------------------------------------------------------------
   // Two-stage funnel, runs on every active-leaf-change (debounced by the view at
   // 300ms):
@@ -1324,12 +1397,16 @@ export class IndexStore {
     if (!self) return this.keywordRank(active);
 
     // --- Stage 1: coarse mean-vector shortlist (LOW recall floor) ------------
+    // Centered means (anisotropy correction) when available, so the shortlist already
+    // reflects topical — not baseline — similarity; the floor shifts down with them.
+    const selfMean = this.centeredMean(self);
+    const floor = this.centroid ? COARSE_FLOOR_CENTERED : COARSE_FLOOR;
     const shortlist: { entry: IndexEntry; coarse: number }[] = [];
     for (const entry of this.entries.values()) {
       if (entry.path === active.path) continue;
       if (entry.dims !== self.dims) continue;
-      const coarse = cosineSimilarity(self.meanVector, entry.meanVector);
-      if (coarse < COARSE_FLOOR) continue;
+      const coarse = cosineSimilarity(selfMean, this.centeredMean(entry));
+      if (coarse < floor) continue;
       shortlist.push({ entry, coarse });
     }
     shortlist.sort((a, b) => b.coarse - a.coarse);
@@ -1428,13 +1505,15 @@ export class IndexStore {
     // then comes mainly from the title-vs-overall similarity, as it should. Notes
     // with any body (chunkCount >= 2) use full bidirectional MaxSim. mean + chunk
     // rows are both normalized, so the dot IS a cosine; floor at 0 like the max.
+    // Use CENTERED means here: aChunks/bChunks are centered by the dequant cache, so
+    // the title-vs-mean dot must compare like with like (centered chunk · centered mean).
     const aToB =
       a.chunkCount === 1
-        ? Math.max(0, dotRow(aChunks, TITLE_CHUNK_INDEX, b.meanVector, dims))
+        ? Math.max(0, dotRow(aChunks, TITLE_CHUNK_INDEX, this.centeredMean(b), dims))
         : this.directionalMax(aChunks, a.chunkCount, bChunks, b.chunkCount, dims);
     const bToA =
       b.chunkCount === 1
-        ? Math.max(0, dotRow(bChunks, TITLE_CHUNK_INDEX, a.meanVector, dims))
+        ? Math.max(0, dotRow(bChunks, TITLE_CHUNK_INDEX, this.centeredMean(a), dims))
         : this.directionalMax(bChunks, b.chunkCount, aChunks, a.chunkCount, dims);
     return (aToB + bToA) / 2;
   }
