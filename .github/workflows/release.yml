@@ -57,10 +57,10 @@ jobs:
 
       - name: Package plugin folder (includes self-hosted wasm)
         run: |
-          mkdir -p dist/related-notes
-          cp main.js manifest.json styles.css dist/related-notes/
-          cp -r ort dist/related-notes/ort
-          (cd dist && zip -r ../related-notes.zip related-notes)
+          mkdir -p dist/smart-related-notes
+          cp main.js manifest.json styles.css dist/smart-related-notes/
+          cp -r ort dist/smart-related-notes/ort
+          (cd dist && zip -r ../smart-related-notes.zip smart-related-notes)
 
       - name: Extract release notes from annotated tag
         run: |
@@ -76,7 +76,7 @@ jobs:
             main.js
             manifest.json
             styles.css
-            related-notes.zip
+            smart-related-notes.zip
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -90,4 +90,4 @@ jobs:
             main.js
             manifest.json
             styles.css
-            related-notes.zip
+            smart-related-notes.zip

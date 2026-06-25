@@ -114,8 +114,8 @@ changes (sliders, toggles) never trigger a re-embed.
 
 ### From a release
 
-Download `related-notes.zip` from the latest release and extract it into
-`.obsidian/plugins/related-notes/`. The zip already includes the ONNX runtime
+Download `smart-related-notes.zip` from the latest release and extract it into
+`.obsidian/plugins/smart-related-notes/`. The zip already includes the ONNX runtime
 `.wasm` in its `ort/` folder, so nothing extra is needed — only the model weights
 are fetched, once, on first use.
 
@@ -150,7 +150,7 @@ npm run lint         # eslint (typescript-eslint + eslint-plugin-obsidianmd)
 pinned `onnxruntime-web` version + a CDN fallback URL) and copies the matching
 `onnxruntime-web` `.wasm`/`.mjs` assets into `ort/`. Both are build artifacts and are
 gitignored. The release workflow packages `main.js`, `manifest.json`, `styles.css`,
-and the `ort/` folder into `related-notes.zip`.
+and the `ort/` folder into `smart-related-notes.zip`.
 
 The renderer reports itself as a Node environment, which would otherwise make
 transformers.js pick the (externalized, unavailable) `onnxruntime-node` backend.

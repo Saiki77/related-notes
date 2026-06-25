@@ -12,7 +12,7 @@ import type {
   WhyReason,
 } from "./index-store";
 
-export const VIEW_TYPE_RELATED = "related-notes";
+export const VIEW_TYPE_RELATED = "smart-related-notes";
 
 // The left-sidebar card stack. Subscribes to the index store's progress so its
 // status line tracks indexing live, and re-ranks (debounced) whenever the active

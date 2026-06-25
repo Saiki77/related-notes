@@ -436,7 +436,7 @@ export default class RelatedNotesPlugin extends Plugin {
   private async configureWasmPaths(): Promise<void> {
     try {
       const probe = normalizePath(`${this.pluginDir()}/${ORT_PROBE_FILE}`);
-      // Only self-host if the wasm actually shipped (the full related-notes.zip).
+      // Only self-host if the wasm actually shipped (the full smart-related-notes.zip).
       // BRAT / manual installs copy just main.js+manifest+styles, so there is no
       // ort/ folder — getResourcePath would still return an app:// URL, but it
       // 404s, wedging onnxruntime with ZERO providers ("Unsupported device: wasm.
@@ -461,7 +461,7 @@ export default class RelatedNotesPlugin extends Plugin {
   private pluginDir(): string {
     return (
       this.manifest.dir ??
-      `${this.app.vault.configDir}/plugins/related-notes`
+      `${this.app.vault.configDir}/plugins/smart-related-notes`
     );
   }
 
