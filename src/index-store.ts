@@ -1,5 +1,6 @@
 import { App, TFile, Notice, normalizePath, debounce, type Debouncer } from "obsidian";
 import { EmbeddingEngine, type ProgressCallback } from "./embeddings";
+import { yieldToUI } from "./async-yield";
 import {
   cosineSimilarity,
   meanOf,
@@ -130,12 +131,6 @@ const ADAPTIVE_CHUNK_FLOOR_NOTES = 2000;
 // it never collapses when the user lowers topK/shortlistSize.
 const DEQUANT_CACHE_FLOOR = 256;
 
-// Yield a real macrotask so the renderer can paint + process input between embed
-// batches — a big vault never freezes Obsidian even when microtask-only sleeps
-// coalesce. window.setTimeout(0) is the documented "yield a macrotask" (and the
-// window-scoped timer keeps popout-window compatibility per obsidianmd lint).
-const yieldToUI = (): Promise<void> =>
-  new Promise<void>((r) => window.setTimeout(r, 0));
 
 // In-memory entry. The chunk vectors are kept as int8 in RAM (`chunkBytes`, length
 // chunkCount*dims, plus one fp32 `scales` per row) — ~4x smaller than fp32 — and

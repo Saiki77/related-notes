@@ -4,6 +4,7 @@ import {
   type FeatureExtractionPipeline,
 } from "@huggingface/transformers";
 import { ORT_WEB_CDN, ORT_GLUE_JSEP } from "./ort-version";
+import { yieldToUI } from "./async-yield";
 // cosineSimilarity now lives in the dependency-free vector-math module (so the
 // node benchmark can import it without pulling in transformers). Re-exported here
 // for back-compat with existing importers and the `cosineSimilarity` symbol.
@@ -127,12 +128,11 @@ export type EmbedKind = "query" | "passage";
 // changes WHEN pipe() runs — never the order of the returned rows.
 const EMBED_SUB_BATCH = 12;
 
-// Yield a real macrotask so the renderer paints + processes input between embed
-// sub-batches. Local to embeddings.ts (no import from index-store): window.setTimeout(0)
-// is the documented "yield a macrotask", and the window-scoped timer keeps
-// popout-window compatibility per the obsidianmd lint rule.
-const yieldToUI = (): Promise<void> =>
-  new Promise<void>((r) => window.setTimeout(r, 0));
+// Yield to the renderer only after this much wall-clock has accrued since the last
+// yield, instead of after every sub-batch. On a fast machine many sub-batches fit
+// in one budget so we yield rarely (near full throughput); on a slow one we still
+// yield often enough to stay responsive. ~20ms ≈ one frame of headroom.
+const YIELD_BUDGET_MS = 20;
 
 // One feature-extraction engine, bound to a single model id. The plugin holds one
 // instance and rebuilds it when the model id or device preference changes.
@@ -262,15 +262,16 @@ export class EmbeddingEngine {
     // SUB-BATCH the forward passes so the main thread is never blocked for long: one
     // pipe() call over a whole outer batch is a single uninterruptible synchronous
     // WASM pass (~seconds for 130+ chunks) that froze Obsidian. We run pipe() per
-    // EMBED_SUB_BATCH slice and yield a macrotask BETWEEN slices so the renderer can
-    // paint/handle input. Rows are concatenated IN INPUT ORDER, so the returned
-    // Float32Array[] is byte-identical to the old whole-batch result — build()'s
-    // offset regrouping and ranking output are unchanged. A single input (or one
-    // sub-batch's worth) takes exactly one pass with NO extra yield, so embed() and a
-    // 1-text batch behave exactly as before.
+    // EMBED_SUB_BATCH slice and yield (a MessageChannel macrotask — NOT setTimeout,
+    // which Chromium throttles to ~1/sec when unfocused and turned this into minutes
+    // of idle waiting) only once YIELD_BUDGET_MS of work has accrued. Rows are
+    // concatenated IN INPUT ORDER, so the returned Float32Array[] is byte-identical to
+    // the old whole-batch result — build()'s offset regrouping and ranking output are
+    // unchanged. A single input (or one sub-batch's worth) takes exactly one pass with
+    // NO yield, so embed() and a 1-text batch behave exactly as before.
     const result: Float32Array[] = [];
+    let budgetStart = performance.now();
     for (let start = 0; start < inputs.length; start += EMBED_SUB_BATCH) {
-      if (start > 0) await yieldToUI();
       const slice = inputs.slice(start, start + EMBED_SUB_BATCH);
       const out = await pipe(slice, { pooling: "mean", normalize: true });
       const data = out.data as Float32Array;
@@ -282,6 +283,15 @@ export class EmbeddingEngine {
           : Math.floor(data.length / n);
       for (let i = 0; i < n; i++) {
         result.push(new Float32Array(data.subarray(i * dims, (i + 1) * dims)));
+      }
+      // Yield between sub-batches, but only after enough work to be worth a macrotask
+      // (and never after the final slice). Order/values above are already committed.
+      if (
+        start + EMBED_SUB_BATCH < inputs.length &&
+        performance.now() - budgetStart > YIELD_BUDGET_MS
+      ) {
+        await yieldToUI();
+        budgetStart = performance.now();
       }
     }
     return result;
