@@ -38,6 +38,18 @@ let envConfigured = false;
 // present it overrides the CDN fallback. Must end in a trailing slash.
 let wasmBaseUrl: string | null = null;
 
+// WASM worker-thread count, set by the plugin from the "Indexing speed" setting. 1 =
+// single-threaded (lightest memory, slowest); higher = faster but the threaded-wasm
+// shared heap holds several GB while loaded. null until set (falls back to a default).
+let embedThreads: number | null = null;
+
+// Set the WASM thread count and force configureEnv to re-apply it on the next init
+// (the plugin recreates the engine when this changes, the same as a device change).
+export function setEmbedThreads(n: number): void {
+  embedThreads = n > 0 ? Math.floor(n) : 1;
+  envConfigured = false;
+}
+
 // Point onnxruntime-web at a locally-served directory of .wasm files. The plugin
 // resolves this from its own folder via the vault adapter, guaranteeing the .wasm
 // matches the bundled glue and that the plugin runs offline. Call before init().
@@ -84,12 +96,14 @@ function configureEnv(): void {
     | undefined;
   // MULTI-THREADED WASM. The renderer is not cross-origin isolated, but Electron
   // exposes SharedArrayBuffer anyway, so ort-web's threaded WASM runs and uses the
-  // otherwise-idle cores — measured ~6x faster than single-threaded on a 14-core Mac
-  // (a full reindex dropped from minutes to ~28s). Use a capped slice of the cores,
-  // leaving 2 for the UI. (numThreads>1 is ignored harmlessly if SAB is unavailable.)
+  // otherwise-idle cores (~6x faster than single-threaded). The count comes from the
+  // "Indexing speed" setting (setEmbedThreads); 1 = lightest memory but slowest, more
+  // = faster but the shared heap holds several GB. Falls back to a balanced default.
+  // (numThreads>1 is ignored harmlessly if SAB is unavailable.)
   const cores =
     typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
-  const threads = Math.max(1, Math.min(cores - 2, 8));
+  const threads =
+    embedThreads ?? Math.max(1, Math.min(Math.ceil(cores / 3), 4));
   for (const wasm of [onnx?.wasm, onnx?.env?.wasm]) {
     if (!wasm) continue;
     wasm.wasmPaths = wasmPaths;
@@ -201,23 +215,19 @@ export class EmbeddingEngine {
       // "wasm". Every order ends in "wasm" — the always-available CPU path — so
       // init can never dead-end on an invalid device.
       //
-      // "auto" prefers WebGPU when a GPU adapter is present: measured ~6.5s for a
-      // full reindex vs ~28s on multi-threaded WASM (and ~minutes single-threaded).
-      // The old WebGPU memory leak that forced this to WASM is fixed — we now embed
-      // in fixed-size sub-batches AND dispose each output tensor (embedBatch), which
-      // releases the GPU buffers every pass; memory stays flat across many reindexes.
-      // WASM (multi-threaded) is the fallback when there's no usable GPU.
+      // "auto" uses MULTI-THREADED WASM, NOT WebGPU. WebGPU is faster per reindex
+      // (~6.5s vs ~28s), but onnxruntime-web's WebGPU backend accumulates GPU/unified
+      // memory across reindexes (and across plugin reloads) until Obsidian crashes
+      // (observed twice on this vault, ~70GB). Per-pass tensor disposal (1.7.0) was not
+      // enough. WASM reuses one heap and is memory-stable, so it's the safe default.
+      // WebGPU stays available only as an EXPLICIT pin for users who accept that cost.
       let order: Array<"webgpu" | "wasm">;
-      if (this.devicePref === "wasm") {
-        order = ["wasm"];
-      } else if (this.devicePref === "webgpu") {
+      if (this.devicePref === "webgpu") {
         // Honour the explicit pin, but fall back to wasm if webgpu fails to come up.
         order = ["webgpu", "wasm"];
       } else {
-        // "auto": use the GPU when a real adapter is present, else multi-threaded WASM.
-        order = (await EmbeddingEngine.webgpuAvailable())
-          ? ["webgpu", "wasm"]
-          : ["wasm"];
+        // "auto" and "wasm" both resolve to the memory-stable multi-threaded WASM path.
+        order = ["wasm"];
       }
 
       let lastErr: unknown;

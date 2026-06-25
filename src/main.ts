@@ -21,8 +21,21 @@ import {
 import {
   EmbeddingEngine,
   setWasmBaseUrl,
+  setEmbedThreads,
   type DevicePref,
 } from "./embeddings";
+
+// "Indexing speed" presets → WASM worker-thread count. Light is single-threaded
+// (lightest memory, slowest); Fast uses a capped slice of the cores (fastest, but the
+// threaded-wasm shared heap holds several GB while loaded); Balanced sits between.
+export type IndexSpeed = "light" | "balanced" | "fast";
+function threadsForSpeed(speed: IndexSpeed): number {
+  const cores =
+    typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
+  if (speed === "light") return 1;
+  if (speed === "fast") return Math.max(1, Math.min(cores - 2, 8));
+  return Math.max(1, Math.min(Math.ceil(cores / 3), 4)); // balanced
+}
 import { IndexStore, stripMarkdown, type IndexStoreOptions } from "./index-store";
 import { RelatedNotesView, VIEW_TYPE_RELATED } from "./view";
 import { TitleIndex } from "./title-index";
@@ -51,6 +64,8 @@ interface WorkspaceWithSuggest {
 export interface RelatedNotesSettings {
   modelId: string;
   device: DevicePref;
+  // WASM indexing speed/memory trade-off (worker-thread count). See threadsForSpeed.
+  indexSpeed: IndexSpeed;
   topK: number;
   minSimilarity: number;
   // One-time flag: when false, onload lowers a pre-1.8.0 minSimilarity onto the new
@@ -87,6 +102,7 @@ export const DEFAULT_SETTINGS: RelatedNotesSettings = {
   // document search, and rank note-to-note similarity poorly.)
   modelId: "Xenova/paraphrase-multilingual-MiniLM-L12-v2",
   device: "auto",
+  indexSpeed: "balanced",
   topK: 12,
   // Mean-centering (1.8.0) removes the anisotropy noise floor, so scores sit on a
   // lower, floor-free scale where ~0.2 cleanly separates topically-related notes from
@@ -196,6 +212,7 @@ export default class RelatedNotesPlugin extends Plugin {
   // equal the "auto" preference and would rebuild on every unrelated save.
   private appliedModelId!: string;
   private appliedDevicePref!: DevicePref;
+  private appliedIndexSpeed!: IndexSpeed;
   // The embedding-shape settings the current index was built for. Changing any of
   // them alters WHAT is embedded per note, so they trigger a rebuild like a model
   // change. (showSummary also changes whether chunk text is persisted.)
@@ -230,9 +247,12 @@ export default class RelatedNotesPlugin extends Plugin {
     // fallback. Awaited so the base is set before the first embed.
     await this.configureWasmPaths();
 
+    // Apply the WASM thread count BEFORE the engine's first init (configureEnv reads it).
+    setEmbedThreads(threadsForSpeed(this.settings.indexSpeed));
     this.engine = new EmbeddingEngine(this.settings.modelId, this.settings.device);
     this.appliedModelId = this.settings.modelId;
     this.appliedDevicePref = this.settings.device;
+    this.appliedIndexSpeed = this.settings.indexSpeed;
     this.appliedChunking = this.settings.chunking;
     this.appliedMaxChunks = this.settings.maxChunks;
     this.appliedShowSummary = this.settings.showSummary;
@@ -767,6 +787,8 @@ export default class RelatedNotesPlugin extends Plugin {
     // preference — the bug that made every slider drag rebuild the vault).
     const modelChanged = this.appliedModelId !== this.settings.modelId;
     const deviceChanged = this.appliedDevicePref !== this.settings.device;
+    // Changing the thread count needs a fresh engine so configureEnv re-applies it.
+    const indexSpeedChanged = this.appliedIndexSpeed !== this.settings.indexSpeed;
     // Embedding-SHAPE changes alter WHAT is embedded (chunking on/off, the chunk
     // cap) or whether chunk text is persisted (showSummary), so they too need a
     // full re-embed — but they keep the SAME engine.
@@ -775,15 +797,18 @@ export default class RelatedNotesPlugin extends Plugin {
       this.appliedMaxChunks !== this.settings.maxChunks ||
       this.appliedShowSummary !== this.settings.showSummary;
 
-    if ((modelChanged || deviceChanged) && !this.swapping) {
+    if ((modelChanged || deviceChanged || indexSpeedChanged) && !this.swapping) {
       this.swapping = true;
       try {
+        // Re-apply the thread count before the new engine's init reads it.
+        setEmbedThreads(threadsForSpeed(this.settings.indexSpeed));
         this.engine = new EmbeddingEngine(
           this.settings.modelId,
           this.settings.device,
         );
         this.appliedModelId = this.settings.modelId;
         this.appliedDevicePref = this.settings.device;
+        this.appliedIndexSpeed = this.settings.indexSpeed;
         this.appliedChunking = this.settings.chunking;
         this.appliedMaxChunks = this.settings.maxChunks;
         this.appliedShowSummary = this.settings.showSummary;
@@ -880,19 +905,40 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Compute device")
       .setDesc(
-        "Auto uses your GPU (WebGPU) when available — fastest by far (a full reindex " +
-          "in seconds) — and falls back to multi-threaded WASM on the CPU otherwise. " +
-          "WASM forces the CPU path (no GPU, smaller model download). Both are " +
-          "memory-stable. Changing this re-downloads the model for the new backend.",
+        "Auto runs on the CPU (WASM) — memory-stable and recommended. WebGPU is faster " +
+          "per reindex but its GPU backend accumulates memory until Obsidian crashes " +
+          "(seen on large vaults), so it's an explicit opt-in only. Changing this " +
+          "re-downloads the model for the new backend.",
       )
       .addDropdown((d) =>
         d
-          .addOption("auto", "Auto · GPU when available (recommended)")
-          .addOption("webgpu", "WebGPU/GPU")
-          .addOption("wasm", "WASM/CPU (multi-threaded)")
+          .addOption("auto", "Auto · WASM/CPU (recommended)")
+          .addOption("webgpu", "WebGPU/GPU (faster, but can spike memory)")
+          .addOption("wasm", "WASM/CPU")
           .setValue(this.plugin.settings.device)
           .onChange(async (v) => {
             this.plugin.settings.device = v as DevicePref;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Indexing speed")
+      .setDesc(
+        "How many CPU threads to use for indexing (WASM only). Fast uses the most " +
+          "cores and is quickest, but the model's worker threads hold several GB of RAM " +
+          "while loaded; Light is single-threaded — the smallest footprint (~CPU-light) " +
+          "but a full reindex takes longer. Editing a note re-indexes just that note " +
+          "and stays fast at any setting. Changing this rebuilds the index.",
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("light", "Light · 1 thread (smallest memory)")
+          .addOption("balanced", "Balanced (recommended)")
+          .addOption("fast", "Fast · all cores (most memory)")
+          .setValue(this.plugin.settings.indexSpeed)
+          .onChange(async (v) => {
+            this.plugin.settings.indexSpeed = v as IndexSpeed;
             await this.plugin.saveSettings();
           }),
       );

@@ -21,12 +21,13 @@ embedding model. For the note you're viewing, every other note is ranked by
 similarity percentage.
 
 The model runs through [`@huggingface/transformers`](https://www.npmjs.com/package/@huggingface/transformers)
-on the local ONNX runtime. By default it uses your **GPU via WebGPU** when one is
-available — a full reindex takes seconds — and falls back to **multi-threaded WASM**
-on the CPU otherwise (still fast, no GPU needed). Both are memory-stable. The
-runtime's `.wasm` is **shipped inside the plugin**, so the only network traffic ever
-is the one-time download of the model weights from the Hugging Face Hub; afterwards
-the weights are cached and nothing is fetched again.
+on the local ONNX runtime, on the **CPU via WASM** by default — multi-threaded so a
+full reindex is quick, and memory-stable. (A **WebGPU** option exists and is faster,
+but its GPU backend can accumulate memory on large vaults, so it's an explicit opt-in.)
+An **Indexing speed** setting trades CPU threads against memory. The runtime's `.wasm`
+is **shipped inside the plugin**, so the only network traffic ever is the one-time
+download of the model weights from the Hugging Face Hub; afterwards the weights are
+cached and nothing is fetched again.
 
 Vectors persist as compact JSON in the plugin's config dir, so the index survives
 restarts and only changed notes are re-embedded.
@@ -36,8 +37,8 @@ restarts and only changed notes are re-embedded.
 - **Semantic ranking** — for the active note, ranks every other note by cosine
   similarity and shows the top matches as cards: **title**, muted **folder path**,
   a short **snippet**, and a **similarity %** pill. Click a card to open that note.
-- **Fully local & private** — embeddings run in-app on your GPU (WebGPU) or CPU
-  (WASM); notes are never sent anywhere. Works offline after the one-time download.
+- **Fully local & private** — embeddings run in-app on the CPU (WASM, multi-threaded;
+  WebGPU optional); notes are never sent anywhere. Works offline after the one-time download.
 - **Multilingual** — a multilingual model matches notes across German, English, and
   100+ other languages.
 - **Persisted index** — vectors are saved to disk, so reopening the vault is instant
@@ -60,10 +61,12 @@ restarts and only changed notes are re-embedded.
   symmetric sentence-similarity model — the right tool for ranking how alike two
   notes are. `paraphrase-multilingual-mpnet-base-v2` (Best quality) is stronger but
   larger. e5 models are retrieval-oriented and rank note similarity less well.
-- **Compute device** — **Auto** (recommended) uses the **GPU (WebGPU)** when
-  available — fastest by far — and falls back to **multi-threaded WASM** on the CPU.
-  Pin **WebGPU** or **WASM** to force one. Both are memory-stable; switching
-  re-downloads the model for that backend.
+- **Compute device** — **Auto** (recommended) runs on the **CPU (WASM)**, which is
+  memory-stable. **WebGPU** is faster but its GPU backend can accumulate memory on
+  large vaults, so it's an explicit opt-in. Switching re-downloads the model.
+- **Indexing speed** — CPU threads vs memory: **Fast** (all cores, quickest, but the
+  worker threads hold several GB), **Balanced** (default), **Light** (1 thread, smallest
+  footprint, slower full reindex). Editing a note stays fast at any setting.
 - **Number of results** — how many cards to show.
 - **Minimum similarity** — hide matches below this topical-similarity score (0–1).
   Scores are mean-centered (the embedding noise floor is removed), so unrelated notes
