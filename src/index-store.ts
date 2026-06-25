@@ -35,7 +35,7 @@ import {
 // byte-for-byte the old load-time dequant, so ranking results are identical; only
 // memory + load time change.
 // =============================================================================
-const INDEX_VERSION = 5 as const;
+const INDEX_VERSION = 6 as const;
 
 // The small JSON manifest (header + per-entry metadata + scales + chunkTexts) and
 // the binary blob (all fp32 means + all int8 chunk buffers). Written/renamed via
@@ -446,7 +446,17 @@ export function splitIntoSections(
           stack.pop();
         }
         levels.push(level);
-        stack.push(h[2].trim());
+        // Strip inline markdown from the heading text so the breadcrumb (and the
+        // heading-context embed prefix built from it) carry clean words, not styled
+        // markers like "**Stage A:**" or "[[link]]".
+        const title = h[2]
+          .trim()
+          .replace(/[*_~`]+/g, "")
+          .replace(/\[\[([^\]|]+)\|([^\]]+)\]\]/g, "$2")
+          .replace(/\[\[([^\]]+)\]\]/g, "$1")
+          .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+          .trim();
+        stack.push(title);
         continue; // the heading text lives in the breadcrumb, not the body
       }
     }
