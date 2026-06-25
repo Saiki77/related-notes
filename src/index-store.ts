@@ -87,6 +87,10 @@ const COARSE_FLOOR = 0.2;
 // notes go to ~0/negative, related stay positive), so the coarse floor is lower and
 // slightly negative to preserve recall — the real cut is the Stage-2 minSimilarity.
 const COARSE_FLOOR_CENTERED = -0.1;
+// Glow context gate: a content-rich target only glows when the active note's centered
+// (topical) similarity to it clears this floor — so a common word like "analysis" only
+// glows the math "Analysis" note when the note is actually on that topic.
+const GLOW_CONTEXT_FLOOR = 0.15;
 
 // Hybrid structural boost weights and cap. boost is added to the semantic score
 // AFTER it is scaled into [0, B_MAX]; B_MAX itself comes from options
@@ -1370,6 +1374,47 @@ export class IndexStore {
   // not yet computed. Used by Stage 1 and the stub-grounding branch of biMax().
   private centeredMean(entry: IndexEntry): Float32Array {
     return this.centeredMeans.get(entry.path) ?? entry.meanVector;
+  }
+
+  // Does a glow for `targetPath` make sense in the active note's CONTEXT? (Used by the
+  // inline glow + Link-all + auto-link so a title that is also a common word only
+  // links where it fits.) Two paths because an EMPTY target carries no topic to judge:
+  //   - Content-rich target: gate by centered (topical) similarity to the active note.
+  //   - Stub target: glow only if the active note already LINKS to it — the title alone
+  //     (often an ambiguous word) isn't enough to infer the sense.
+  // Returns true (don't gate) when either note isn't indexed yet.
+  glowAllowed(activePath: string, targetPath: string): boolean {
+    const a = this.entries.get(activePath);
+    const b = this.entries.get(targetPath);
+    if (!a || !b) return true;
+    if (b.chunkCount > 1 && b.dims === a.dims) {
+      return (
+        cosineSimilarity(this.centeredMean(a), this.centeredMean(b)) >=
+        GLOW_CONTEXT_FLOOR
+      );
+    }
+    // Stub target: no topic to judge, so glow only when there's an explicit structural
+    // tie — a link in EITHER direction or a shared tag. (An isolated empty stub like a
+    // bare "Analysis" note has none, so it won't glow off-topic.)
+    const mc = this.app.metadataCache;
+    const fwd = mc.resolvedLinks[activePath];
+    if (fwd && fwd[targetPath]) return true;
+    const back = mc.resolvedLinks[targetPath];
+    if (back && back[activePath]) return true;
+    const ac = mc.getCache(activePath);
+    const bc = mc.getCache(targetPath);
+    if (ac && bc) {
+      const at = new Set<string>();
+      for (const t of ac.tags ?? []) at.add(normalizeTag(t.tag));
+      if (ac.frontmatter?.tags) addFrontmatterTags(at, ac.frontmatter.tags);
+      if (at.size > 0) {
+        const bt = new Set<string>();
+        for (const t of bc.tags ?? []) bt.add(normalizeTag(t.tag));
+        if (bc.frontmatter?.tags) addFrontmatterTags(bt, bc.frontmatter.tags);
+        for (const t of bt) if (at.has(t)) return true;
+      }
+    }
+    return false;
   }
 
   // --- ranking ---------------------------------------------------------------

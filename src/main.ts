@@ -485,6 +485,10 @@ export default class RelatedNotesPlugin extends Plugin {
     // will be linked; otherwise only the first unlinked occurrence glows.
     glowBridge.glowAll = this.settings.autoLinkSubsequent;
     glowBridge.titleIndex = this.titleIndex;
+    // Semantic context gate: only glow a mention whose target fits the note's topic
+    // (a common word like "analysis" no longer glows the math note in a security note).
+    glowBridge.contextGate = (activePath, targetPath) =>
+      this.store.glowAllowed(activePath, targetPath);
     // The app handle lets buildGlow resolve each EditorView's OWN file (split-pane
     // correct) instead of relying on the single global active path.
     glowBridge.app = this.app;

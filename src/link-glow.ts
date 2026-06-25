@@ -69,6 +69,10 @@ export interface GlowBridge {
   // can't be matched to a leaf (should not normally happen).
   activePath: string | null;
   insert: GlowInsert | null;
+  // Semantic context gate: returns false when glowing `targetPath` in the note at
+  // `activePath` doesn't fit the topic (backed by IndexStore.glowAllowed). null when
+  // the index isn't ready — then every resolved mention passes.
+  contextGate: ((activePath: string, targetPath: string) => boolean) | null;
 }
 
 // The single shared bridge instance. Exported so main.ts mutates the same object
@@ -82,6 +86,7 @@ export const glowBridge: GlowBridge = {
   app: null,
   activePath: null,
   insert: null,
+  contextGate: null,
 };
 
 // Resolve the file PATH that owns a given EditorView by matching its CM6 instance
@@ -233,6 +238,9 @@ export function detectMentions(
     // Never link a note to itself (the alternation already excludes own
     // surfaces, but a basename collision could still resolve here).
     if (resolved.file.path === activePath) continue;
+    // Semantic context gate: skip a mention whose target doesn't fit this note's topic.
+    if (glowBridge.contextGate && !glowBridge.contextGate(activePath, resolved.file.path))
+      continue;
 
     if (!opts.all) {
       if (seenTargets.has(resolved.file.path)) continue;
@@ -342,6 +350,8 @@ function buildGlow(view: EditorView): DecorationSet {
     if (!resolved) continue;
     if (resolved.ambiguous && !b.glowAmbiguous) continue;
     if (resolved.file.path === activePath) continue;
+    // Semantic context gate: skip a mention whose target doesn't fit this note's topic.
+    if (b.contextGate && !b.contextGate(activePath, resolved.file.path)) continue;
 
     if (!b.glowAll) {
       if (seenTargets.has(resolved.file.path)) continue;
