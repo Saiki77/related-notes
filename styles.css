@@ -214,19 +214,20 @@
    built on core CSS variables so a theme/snippet can override it.
    ============================================================================= */
 .srn-glow {
-  border-radius: var(--radius-s);
-  background-color: var(--text-highlight-bg);
-  box-shadow: inset 0 -1px 0 0 var(--interactive-accent);
+  /* A slim blue underline: a subtle, non-intrusive hint that a concept has a note
+     and can be linked — and visually distinct from a real wikilink (which the theme
+     colours differently). No background/highlight, so it never distracts. */
+  text-decoration: underline;
+  text-decoration-color: var(--color-blue);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
   cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    box-shadow 120ms ease;
+  transition: text-decoration-thickness 120ms ease;
 }
 
 .srn-glow:hover {
-  background-color: var(--interactive-accent);
-  color: var(--text-on-accent);
-  box-shadow: inset 0 -1px 0 0 var(--interactive-accent);
+  /* Gentle affordance on hover — just a slightly thicker underline. */
+  text-decoration-thickness: 2px;
 }
 
 /* =============================================================================
