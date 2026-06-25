@@ -1,0 +1,87 @@
+<svg viewBox="0 0 1200 440" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="1200" height="440" rx="20" fill="#191920"/>
+  <rect x="0.5" y="0.5" width="1199" height="439" rx="19.5" fill="none" stroke="#2e2e38" stroke-width="1"/>
+
+  <g transform="translate(64,72)">
+    <g transform="translate(0,4)">
+      <path d="M14 0 L17.5 10.5 L28 14 L17.5 17.5 L14 28 L10.5 17.5 L0 14 L10.5 10.5 Z" fill="#a78bfa"/>
+    </g>
+    <text x="40" y="24" fill="#ededf2" font-size="40" font-weight="600" letter-spacing="-0.5">Smart Related Notes</text>
+  </g>
+
+  <text x="64" y="150" fill="#a7a7b4" font-size="21" font-weight="400">The notes most related to what you're writing —</text>
+  <text x="64" y="180" fill="#a7a7b4" font-size="21" font-weight="400">found by <tspan fill="#cfcfe0" font-weight="500">meaning</tspan>, running entirely on your own machine.</text>
+
+  <g transform="translate(64,222)" font-size="15">
+    <g>
+      <rect x="0" y="0" width="210" height="38" rx="19" fill="#221f33" stroke="#4a3f78" stroke-width="1"/>
+      <circle cx="22" cy="19" r="4" fill="#5b9bff"/>
+      <text x="38" y="24" fill="#cdcfe6">Inline link suggestions</text>
+    </g>
+    <g transform="translate(224,0)">
+      <rect x="0" y="0" width="178" height="38" rx="19" fill="#221f33" stroke="#4a3f78" stroke-width="1"/>
+      <circle cx="22" cy="19" r="4" fill="#a78bfa"/>
+      <text x="38" y="24" fill="#cdcfe6">Semantic ranking</text>
+    </g>
+    <g transform="translate(416,0)">
+      <rect x="0" y="0" width="170" height="38" rx="19" fill="#1c2a22" stroke="#2f5a3f" stroke-width="1"/>
+      <circle cx="22" cy="19" r="4" fill="#4ade80"/>
+      <text x="38" y="24" fill="#bfe6cd">Private &amp; offline</text>
+    </g>
+  </g>
+
+  <g transform="translate(64,300)">
+    <rect x="0" y="0" width="430" height="64" rx="12" fill="#14140f" stroke="#3a3a22" stroke-width="1"/>
+    <g transform="translate(22,20)" stroke="#4ade80" stroke-width="2" fill="none">
+      <rect x="0" y="9" width="22" height="15" rx="3" fill="#142a1c"/>
+      <path d="M4 9 V5 a7 7 0 0 1 14 0 V9"/>
+    </g>
+    <text x="62" y="28" fill="#e6e6ea" font-size="16" font-weight="500">100% local</text>
+    <text x="62" y="49" fill="#8f9a90" font-size="14">No cloud · no API key · works offline after one download</text>
+  </g>
+
+  <g transform="translate(672,56)">
+    <rect x="0" y="0" width="464" height="328" rx="16" fill="#202027" stroke="#33333f" stroke-width="1"/>
+
+    <g transform="translate(24,28)">
+      <path d="M7 0 L8.8 5.2 L14 7 L8.8 8.8 L7 14 L5.2 8.8 L0 7 L5.2 5.2 Z" fill="#a78bfa"/>
+      <text x="26" y="12" fill="#ededf2" font-size="17" font-weight="500">Smart related notes</text>
+      <g transform="translate(398,2)" stroke="#7e7e8c" stroke-width="1.6" fill="none">
+        <path d="M10 1 a5 5 0 1 0 4.5 2.8"/>
+        <path d="M14.5 0 L15 4 L11 3.6" stroke-linejoin="round"/>
+      </g>
+    </g>
+    <text x="24" y="64" fill="#7d7d88" font-size="13">Based on “Proofwork Security On The Self Writing Web”</text>
+
+    <g transform="translate(24,84)">
+      <rect x="0" y="0" width="416" height="68" rx="10" fill="#26262e" stroke="#3d3d49" stroke-width="1"/>
+      <text x="16" y="27" fill="#ededf2" font-size="16" font-weight="500">Proofwork</text>
+      <rect x="362" y="12" width="42" height="22" rx="11" fill="#7c5cff"/>
+      <text x="383" y="27" fill="#f3f0ff" font-size="13" font-weight="500" text-anchor="middle">61%</text>
+      <rect x="16" y="38" width="58" height="20" rx="6" fill="#2f2f3a"/>
+      <text x="45" y="52" fill="#b9b9c8" font-size="12" text-anchor="middle">Related</text>
+      <rect x="82" y="38" width="66" height="20" rx="6" fill="#23202f"/>
+      <text x="115" y="52" fill="#9b8cf0" font-size="12" text-anchor="middle">#projects</text>
+    </g>
+
+    <g transform="translate(24,162)">
+      <rect x="0" y="0" width="416" height="68" rx="10" fill="#26262e" stroke="#3d3d49" stroke-width="1"/>
+      <text x="16" y="27" fill="#ededf2" font-size="16" font-weight="500">Projects</text>
+      <rect x="362" y="12" width="42" height="22" rx="11" fill="#6650cf"/>
+      <text x="383" y="27" fill="#f3f0ff" font-size="13" font-weight="500" text-anchor="middle">53%</text>
+      <rect x="16" y="38" width="58" height="20" rx="6" fill="#2f2f3a"/>
+      <text x="45" y="52" fill="#b9b9c8" font-size="12" text-anchor="middle">Related</text>
+      <rect x="82" y="38" width="66" height="20" rx="6" fill="#23202f"/>
+      <text x="115" y="52" fill="#9b8cf0" font-size="12" text-anchor="middle">#projects</text>
+    </g>
+
+    <g transform="translate(24,240)">
+      <rect x="0" y="0" width="416" height="64" rx="10" fill="#222229" stroke="#34343f" stroke-width="1"/>
+      <text x="16" y="27" fill="#cfcfd8" font-size="16" font-weight="500">UNI Themen</text>
+      <rect x="362" y="12" width="42" height="22" rx="11" fill="#454258"/>
+      <text x="383" y="27" fill="#cfcadf" font-size="13" font-weight="500" text-anchor="middle">23%</text>
+      <rect x="16" y="38" width="78" height="20" rx="6" fill="#1f2733"/>
+      <text x="55" y="52" fill="#7fb0e6" font-size="12" text-anchor="middle">Similar text</text>
+    </g>
+  </g>
+</svg>

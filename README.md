@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/hero.svg" alt="Smart Related Notes — the notes most related to what you're writing, found by meaning, running entirely on your machine" width="880">
+</p>
+
 # Smart Related Notes
 
 A left-sidebar panel that surfaces the notes most **semantically similar** to the
@@ -11,6 +15,14 @@ locally inside the renderer, so your notes never leave your computer. After a
 **one-time** model download (cached on first use), it works **fully offline**. The
 model understands German, English, and 100+ other languages, so matches cross
 languages naturally.
+
+<p align="center">
+  <img src="docs/feature-inline-links.svg" alt="Inline link suggestions — a concept that already has a note glows with a slim underline; click once to turn it into a wikilink, context-aware" width="880">
+</p>
+
+<p align="center">
+  <img src="docs/feature-local.svg" alt="Runs entirely on your machine — on your device, nothing to install, private and offline" width="880">
+</p>
 
 ## How it works
 
@@ -37,6 +49,10 @@ restarts and only changed notes are re-embedded.
 - **Semantic ranking** — for the active note, ranks every other note by cosine
   similarity and shows the top matches as cards: **title**, muted **folder path**,
   a short **snippet**, and a **similarity %** pill. Click a card to open that note.
+- **Inline link suggestions** — when you mention a concept that already has a note, it
+  glows with a slim underline; one click turns the mention into a `[[wikilink]]`. It's
+  context-aware, so a common word (e.g. "analysis") only glows where it fits the topic,
+  and works with or without the easy-links plugin.
 - **Fully local & private** — embeddings run in-app on the CPU (WASM, multi-threaded;
   WebGPU optional); notes are never sent anywhere. Works offline after the one-time download.
 - **Multilingual** — a multilingual model matches notes across German, English, and

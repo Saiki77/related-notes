@@ -1,0 +1,48 @@
+<svg viewBox="0 0 1200 360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <rect width="1200" height="360" rx="20" fill="#191920"/>
+  <rect x="0.5" y="0.5" width="1199" height="359" rx="19.5" fill="none" stroke="#2e2e38" stroke-width="1"/>
+
+  <text x="56" y="62" fill="#ededf2" font-size="30" font-weight="600" letter-spacing="-0.4">Runs entirely on your machine</text>
+  <text x="56" y="98" fill="#a7a7b4" font-size="18">A small multilingual model does the work locally — no cloud, no account, nothing extra to install.</text>
+
+  <g transform="translate(56,138)">
+    <rect x="0" y="0" width="346" height="170" rx="14" fill="#202027" stroke="#33333f" stroke-width="1"/>
+    <g transform="translate(28,30)">
+      <rect x="6" y="6" width="32" height="32" rx="6" fill="#221f33" stroke="#a78bfa" stroke-width="2"/>
+      <rect x="16" y="16" width="12" height="12" rx="2" fill="#a78bfa"/>
+      <g stroke="#a78bfa" stroke-width="2" stroke-linecap="round">
+        <path d="M14 6 V0 M22 6 V0 M30 6 V0"/>
+        <path d="M14 44 V38 M22 44 V38 M30 44 V38"/>
+        <path d="M6 14 H0 M6 22 H0 M6 30 H0"/>
+        <path d="M44 14 H38 M44 22 H38 M44 30 H38"/>
+      </g>
+    </g>
+    <text x="28" y="108" fill="#ededf2" font-size="18" font-weight="500">On your device</text>
+    <text x="28" y="134" fill="#9a9aa6" font-size="15">Embeddings run inside Obsidian,</text>
+    <text x="28" y="155" fill="#9a9aa6" font-size="15">on your GPU or CPU.</text>
+  </g>
+
+  <g transform="translate(427,138)">
+    <rect x="0" y="0" width="346" height="170" rx="14" fill="#202027" stroke="#33333f" stroke-width="1"/>
+    <g transform="translate(28,28)">
+      <path d="M10 34 a10 10 0 0 1 1 -20 a14 14 0 0 1 26 4 a9 9 0 0 1 -2 16 Z" fill="none" stroke="#5b9bff" stroke-width="2" stroke-linejoin="round"/>
+      <path d="M2 4 L44 42" stroke="#ff6b6b" stroke-width="2.4" stroke-linecap="round"/>
+    </g>
+    <text x="28" y="108" fill="#ededf2" font-size="18" font-weight="500">Nothing to install</text>
+    <text x="28" y="134" fill="#9a9aa6" font-size="15">No Ollama, no local server, no</text>
+    <text x="28" y="155" fill="#9a9aa6" font-size="15">second app — it's self-contained.</text>
+  </g>
+
+  <g transform="translate(798,138)">
+    <rect x="0" y="0" width="346" height="170" rx="14" fill="#202027" stroke="#33333f" stroke-width="1"/>
+    <g transform="translate(30,26)">
+      <rect x="2" y="18" width="34" height="24" rx="4" fill="#142a1c" stroke="#4ade80" stroke-width="2"/>
+      <path d="M9 18 V11 a10 10 0 0 1 20 0 V18" fill="none" stroke="#4ade80" stroke-width="2"/>
+      <circle cx="19" cy="29" r="3.2" fill="#4ade80"/>
+      <path d="M19 31 V36" stroke="#4ade80" stroke-width="2" stroke-linecap="round"/>
+    </g>
+    <text x="30" y="108" fill="#ededf2" font-size="18" font-weight="500">Private &amp; offline</text>
+    <text x="30" y="134" fill="#9a9aa6" font-size="15">Notes never leave your machine.</text>
+    <text x="30" y="155" fill="#9a9aa6" font-size="15">Works offline after one download.</text>
+  </g>
+</svg>
