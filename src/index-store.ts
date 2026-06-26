@@ -35,7 +35,7 @@ import {
 // byte-for-byte the old load-time dequant, so ranking results are identical; only
 // memory + load time change.
 // =============================================================================
-const INDEX_VERSION = 7 as const;
+const INDEX_VERSION = 8 as const;
 
 // The small JSON manifest (header + per-entry metadata + scales + chunkTexts) and
 // the binary blob (all fp32 means + all int8 chunk buffers). Written/renamed via
@@ -1369,6 +1369,24 @@ export class IndexStore {
     return `${prefix}: `;
   }
 
+  // User-authored metadata (aliases + tags) for the title chunk's embed input. Chunking
+  // strips YAML frontmatter, which would otherwise DISCARD the note's tags/aliases — the
+  // very "this is a GoA character" signal. Folding them into the title vector lets a
+  // query/note match on them. Note: a tag on EVERY note (e.g. "goa") is absorbed into
+  // the corpus centroid and centered out at rank time, so the lift comes from DISTINCTIVE
+  // tags + aliases; a universal tag neither helps nor hurts.
+  private noteMetaText(file: TFile): string {
+    const cache = this.app.metadataCache.getFileCache(file);
+    if (!cache) return "";
+    const parts: string[] = [];
+    addAliases(parts, cache.frontmatter?.aliases);
+    const tags = new Set<string>();
+    for (const t of cache.tags ?? []) tags.add(normalizeTag(t.tag));
+    if (cache.frontmatter?.tags) addFrontmatterTags(tags, cache.frontmatter.tags);
+    for (const t of tags) parts.push(t.replace(/[/_-]/g, " "));
+    return parts.join(", ").slice(0, 200);
+  }
+
   // Structure-aware whole-note chunking: chunk[0] is the standalone title; the body
   // is split at headings (sections) then paragraphs into ~TARGET_WORDS windows, each
   // kept within MAX_CHUNK_CHARS so the model never truncates it. The first window of
@@ -1378,6 +1396,10 @@ export class IndexStore {
   // capped, and the cap keeps every section represented so no section vanishes.
   private chunkNote(file: TFile, body: string): NoteChunk[] {
     const chunks: NoteChunk[] = [{ text: file.basename, isTitle: true }];
+    // Fold aliases + tags into the title chunk's EMBED input (display text stays the
+    // bare basename). This restores the frontmatter signal that chunking strips.
+    const meta = this.noteMetaText(file);
+    if (meta) chunks[0].embedText = `${file.basename}. ${meta}`;
 
     if (!this.options.chunking) {
       const flat = stripMarkdown(body);
@@ -2445,6 +2467,17 @@ export class IndexStore {
 // (#a/b) are kept whole — a/b and a are distinct, the conservative choice.
 function normalizeTag(tag: string): string {
   return tag.replace(/^#/, "").toLowerCase();
+}
+// Collect note aliases (a frontmatter string or string[]) for the title embed input.
+function addAliases(into: string[], raw: unknown): void {
+  if (typeof raw === "string") {
+    const s = raw.trim();
+    if (s.length > 0) into.push(s);
+  } else if (Array.isArray(raw)) {
+    for (const a of raw) {
+      if (typeof a === "string" && a.trim().length > 0) into.push(a.trim());
+    }
+  }
 }
 
 // Merge frontmatter `tags` (string or string[]) into a tag set.
