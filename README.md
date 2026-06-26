@@ -138,6 +138,9 @@ palette to generate a report note for the whole vault:
 
 - **Suggested links**: the strongest related notes that you have *not* linked yet,
   ranked by similarity. The fastest way to grow a sparse graph.
+- **Suggested tags**: notes that are missing a tag most of their semantic neighbours
+  share. The plugin infers a likely category (e.g. a character profile that lacks your
+  `goa/character` tag) from similarity alone, only proposing discriminative tags.
 - **Orphan notes**: notes with no links in or out, each paired with its closest
   relative as a starting point.
 - **Possibly duplicate**: near-identical pairs worth merging or cross-linking.

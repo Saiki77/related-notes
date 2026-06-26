@@ -555,6 +555,17 @@ export default class RelatedNotesPlugin extends Plugin {
     }
     L.push("");
 
+    L.push(`## Suggested tags (${ins.suggestedTags.length})`, "");
+    L.push(
+      "Notes whose semantic neighbours share a tag they are missing. Inferred from similarity, not rules.",
+      "",
+    );
+    if (ins.suggestedTags.length === 0) L.push("None.");
+    for (const s of ins.suggestedTags) {
+      L.push(`- ${wl(s.path)} -> #${s.tag}  (${s.support}/${s.neighbors} neighbours)`);
+    }
+    L.push("");
+
     L.push(`## Orphan notes (${ins.orphans.length})`, "");
     L.push("Notes with no links in or out. Each shows its closest relative to start from.", "");
     if (ins.orphans.length === 0) L.push("None. Every note is connected.");

@@ -246,6 +246,8 @@ export interface VaultInsights {
   stale: { path: string; mtime: number }[]; // oldest edited
   nearDuplicates: { a: string; b: string; score: number }[]; // very similar pairs
   suggestedLinks: { from: string; to: string; score: number }[]; // related, not yet linked
+  // A note is missing a DISCRIMINATIVE tag that most of its semantic neighbours carry.
+  suggestedTags: { path: string; tag: string; support: number; neighbors: number }[];
 }
 
 // Index lifecycle state, surfaced to the view for its status line.
@@ -1997,6 +1999,16 @@ export class IndexStore {
     return results.slice(0, this.options.topK);
   }
 
+  // Normalized tag set for a note (frontmatter + inline), e.g. {"goa/character","personal"}.
+  private noteTags(path: string): Set<string> {
+    const set = new Set<string>();
+    const cache = this.app.metadataCache.getCache(path);
+    if (!cache) return set;
+    for (const t of cache.tags ?? []) set.add(normalizeTag(t.tag));
+    if (cache.frontmatter?.tags) addFrontmatterTags(set, cache.frontmatter.tags);
+    return set;
+  }
+
   // Vault-level link-building + hygiene pass. For every indexed note it runs the same
   // semantic rank() used by the panel, then aggregates: orphans (no resolved links in
   // or out, each paired with its closest relative as a starting point), the strongest
@@ -2023,10 +2035,28 @@ export class IndexStore {
         for (const k of keys) linked.add(k);
       }
     }
+    // Tag document-frequencies, so tag suggestion proposes only DISCRIMINATIVE tags
+    // (a near-universal tag like "goa" would otherwise be suggested for every note).
+    const tagDF = new Map<string, number>();
+    const tagsByPath = new Map<string, Set<string>>();
+    for (const entry of this.entries.values()) {
+      if (ignore.has(entry.path)) continue;
+      const ts = this.noteTags(entry.path);
+      tagsByPath.set(entry.path, ts);
+      for (const t of ts) tagDF.set(t, (tagDF.get(t) ?? 0) + 1);
+    }
+    const totalNotes = tagsByPath.size;
+    const MAX_TAG_DF = totalNotes * 0.5; // skip tags on >50% of notes (not discriminative)
+    const MIN_TAG_DF = 3; // need a real cluster before propagating
+    const TAG_VOTE = 0.5; // a majority of neighbours must carry the tag
+    const MIN_TAG_NEIGHBORS = 5; // ignore sparse notes (too few tagged neighbours to trust)
+    const TAG_N = 50;
+
     const orphans: VaultInsights["orphans"] = [];
     const stale: VaultInsights["stale"] = [];
     const suggested: VaultInsights["suggestedLinks"] = [];
     const dups: VaultInsights["nearDuplicates"] = [];
+    const suggestedTags: VaultInsights["suggestedTags"] = [];
     const seenSug = new Set<string>();
     const seenDup = new Set<string>();
     for (const entry of this.entries.values()) {
@@ -2061,17 +2091,42 @@ export class IndexStore {
           }
         }
       }
+      // Tag propagation: tags carried by a majority of this note's neighbours but not
+      // by the note itself, restricted to discriminative tags. The plugin infers a
+      // missing category (e.g. goa/character) from similarity, with no hand-written rule.
+      const own = tagsByPath.get(entry.path) ?? new Set<string>();
+      const votes = new Map<string, number>();
+      let nb = 0;
+      for (const r of ranked) {
+        const rt = tagsByPath.get(r.file.path);
+        if (!rt) continue;
+        nb++;
+        for (const t of rt) votes.set(t, (votes.get(t) ?? 0) + 1);
+      }
+      if (nb >= MIN_TAG_NEIGHBORS) {
+        const need = Math.ceil(TAG_VOTE * nb);
+        for (const [t, c] of votes) {
+          if (c < need || own.has(t)) continue;
+          const df = tagDF.get(t) ?? 0;
+          if (df < MIN_TAG_DF || df > MAX_TAG_DF) continue;
+          suggestedTags.push({ path: entry.path, tag: t, support: c, neighbors: nb });
+        }
+      }
     }
     stale.sort((a, b) => a.mtime - b.mtime);
     suggested.sort((a, b) => b.score - a.score);
     dups.sort((a, b) => b.score - a.score);
     orphans.sort((a, b) => (b.closestScore ?? 0) - (a.closestScore ?? 0));
+    suggestedTags.sort(
+      (a, b) => b.support / b.neighbors - a.support / a.neighbors || b.support - a.support,
+    );
     return {
       total: this.entries.size,
       orphans,
       stale: stale.slice(0, STALE_N),
       nearDuplicates: dups.slice(0, DUP_N),
       suggestedLinks: suggested.slice(0, SUGGEST_N),
+      suggestedTags: suggestedTags.slice(0, TAG_N),
     };
   }
 

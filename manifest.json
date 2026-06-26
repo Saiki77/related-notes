@@ -1,7 +1,7 @@
 {
   "id": "smart-related-notes",
   "name": "Smart Related Notes",
-  "version": "1.16.0",
+  "version": "1.17.0",
   "minAppVersion": "1.7.2",
   "description": "Surface notes most semantically similar to the one you're reading in a left-sidebar panel, powered by a small multilingual embedding model that runs entirely on your machine. Private and offline.",
   "author": "Saiki77",
