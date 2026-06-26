@@ -239,6 +239,15 @@ export interface RankedNote {
   connection?: ConnectionType;
 }
 
+// Vault-level insights for the link-building / hygiene report.
+export interface VaultInsights {
+  total: number;
+  orphans: { path: string; closest?: string; closestScore?: number }[]; // no links in/out
+  stale: { path: string; mtime: number }[]; // oldest edited
+  nearDuplicates: { a: string; b: string; score: number }[]; // very similar pairs
+  suggestedLinks: { from: string; to: string; score: number }[]; // related, not yet linked
+}
+
 // Index lifecycle state, surfaced to the view for its status line.
 export type IndexStatus = "idle" | "loading" | "building" | "ready" | "error";
 
@@ -1986,6 +1995,84 @@ export class IndexStore {
 
     results.sort((a, b) => b.score - a.score);
     return results.slice(0, this.options.topK);
+  }
+
+  // Vault-level link-building + hygiene pass. For every indexed note it runs the same
+  // semantic rank() used by the panel, then aggregates: orphans (no resolved links in
+  // or out, each paired with its closest relative as a starting point), the strongest
+  // related-but-UNLINKED pairs (link suggestions), near-duplicate pairs (very high
+  // similarity), and the oldest-edited notes. Thresholds tuned to the score
+  // distribution: suggestions >= SUGGEST_SIM, near-dupes >= DUP_SIM.
+  computeInsights(ignore: Set<string> = new Set()): VaultInsights {
+    const SUGGEST_SIM = 0.5,
+      DUP_SIM = 0.68,
+      STALE_N = 12,
+      SUGGEST_N = 50,
+      DUP_N = 20;
+    const mc = this.app.metadataCache;
+    // Every note that participates in at least one resolved link (either direction).
+    // The generated report itself is ignored as a link source — otherwise a re-run
+    // would see the report's own links and report those notes as no longer orphaned.
+    const linked = new Set<string>();
+    for (const src of Object.keys(mc.resolvedLinks)) {
+      if (ignore.has(src)) continue;
+      const targets = mc.resolvedLinks[src];
+      const keys = targets ? Object.keys(targets) : [];
+      if (keys.length > 0) {
+        linked.add(src);
+        for (const k of keys) linked.add(k);
+      }
+    }
+    const orphans: VaultInsights["orphans"] = [];
+    const stale: VaultInsights["stale"] = [];
+    const suggested: VaultInsights["suggestedLinks"] = [];
+    const dups: VaultInsights["nearDuplicates"] = [];
+    const seenSug = new Set<string>();
+    const seenDup = new Set<string>();
+    for (const entry of this.entries.values()) {
+      if (ignore.has(entry.path)) continue;
+      stale.push({ path: entry.path, mtime: entry.mtime });
+      const file = this.app.vault.getAbstractFileByPath(entry.path);
+      const ranked = (file instanceof TFile ? this.rank(file) : []).filter(
+        (r) => !ignore.has(r.file.path),
+      );
+      if (!linked.has(entry.path)) {
+        const top = ranked[0];
+        orphans.push({
+          path: entry.path,
+          closest: top?.file.path,
+          closestScore: top?.score,
+        });
+      }
+      for (const r of ranked) {
+        const key =
+          entry.path < r.file.path
+            ? `${entry.path} ${r.file.path}`
+            : `${r.file.path} ${entry.path}`;
+        if (r.score >= DUP_SIM) {
+          if (!seenDup.has(key)) {
+            seenDup.add(key);
+            dups.push({ a: entry.path, b: r.file.path, score: r.score });
+          }
+        } else if (r.connection !== "linked" && r.score >= SUGGEST_SIM) {
+          if (!seenSug.has(key)) {
+            seenSug.add(key);
+            suggested.push({ from: entry.path, to: r.file.path, score: r.score });
+          }
+        }
+      }
+    }
+    stale.sort((a, b) => a.mtime - b.mtime);
+    suggested.sort((a, b) => b.score - a.score);
+    dups.sort((a, b) => b.score - a.score);
+    orphans.sort((a, b) => (b.closestScore ?? 0) - (a.closestScore ?? 0));
+    return {
+      total: this.entries.size,
+      orphans,
+      stale: stale.slice(0, STALE_N),
+      nearDuplicates: dups.slice(0, DUP_N),
+      suggestedLinks: suggested.slice(0, SUGGEST_N),
+    };
   }
 
   // Confidence in a note's semantic score, from how much BODY text it carries (see

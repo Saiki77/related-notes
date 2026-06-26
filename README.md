@@ -128,6 +128,21 @@ Next up, going beyond *reading* related notes to *tidying the graph* itself:
 Changing the model or compute device transparently rebuilds the index; unrelated
 changes (sliders, toggles) never trigger a re-embed.
 
+### Vault insights (command)
+
+Run **"Vault insights (suggested links, orphans, duplicates)"** from the command
+palette to generate a report note for the whole vault:
+
+- **Suggested links**: the strongest related notes that you have *not* linked yet,
+  ranked by similarity. The fastest way to grow a sparse graph.
+- **Orphan notes**: notes with no links in or out, each paired with its closest
+  relative as a starting point.
+- **Possibly duplicate**: near-identical pairs worth merging or cross-linking.
+- **Stale notes**: the oldest-edited notes, for review.
+
+It writes/refreshes `Vault Insights (Smart Related Notes).md` and opens it; every entry
+is a clickable wikilink. Nothing is changed in your notes.
+
 ## Install
 
 ### From a release
