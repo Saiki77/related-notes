@@ -58,6 +58,9 @@ restarts and only changed notes are re-embedded.
 - **Semantic search**: the magnifier in the panel header opens a search box that ranks
   your whole vault by meaning against a typed query (e.g. "goa characters" or
   "proofwork"), not just keyword matches.
+- **Linked-notes mode**: the link icon in the panel header switches the cards to show
+  what the current note *links to* (its members, if it's a map-of-content) instead of
+  what it's similar to. The structural complement to similarity ranking.
 - **Inline link suggestions**: when you mention a concept that already has a note, it
   glows with a slim underline; one click turns the mention into a `[[wikilink]]`. It's
   context-aware, so a common word (e.g. "analysis") only glows where it fits the topic,

@@ -38,6 +38,11 @@ export class RelatedNotesView extends ItemView {
   private searchSeq = 0; // guards against stale async query results
   private readonly scheduleSearch: Debouncer<[], void>;
 
+  // "Linked notes" mode (toggled by the header link icon): instead of related notes,
+  // show the notes the active note LINKS TO — i.e. a MOC's members — as cards.
+  private linksMode = false;
+  private linksToggleEl!: HTMLElement;
+
   constructor(leaf: WorkspaceLeaf, plugin: RelatedNotesPlugin) {
     super(leaf);
     this.plugin = plugin;
@@ -72,6 +77,12 @@ export class RelatedNotesView extends ItemView {
     });
     setIcon(searchToggle, "search");
     searchToggle.addEventListener("click", () => this.toggleSearch());
+    this.linksToggleEl = actions.createDiv({
+      cls: "rn-links-toggle clickable-icon",
+      attr: { "aria-label": "Show notes this note links to (MOC members)" },
+    });
+    setIcon(this.linksToggleEl, "link");
+    this.linksToggleEl.addEventListener("click", () => this.toggleLinks());
     const refresh = actions.createDiv({
       cls: "rn-refresh clickable-icon",
       attr: { "aria-label": "Rebuild the index" },
@@ -164,7 +175,17 @@ export class RelatedNotesView extends ItemView {
     this.listEl.empty();
 
     if (!active || active.extension !== "md") {
+      if (this.linksMode) {
+        this.subtitleEl.setText("Open a note to see what it links to");
+        this.renderEmpty("No active note.");
+        return;
+      }
       this.renderRecent();
+      return;
+    }
+
+    if (this.linksMode) {
+      this.renderLinks(active);
       return;
     }
 
@@ -209,6 +230,57 @@ export class RelatedNotesView extends ItemView {
     this.searchQuery = "";
     this.searchRowEl.removeClass("is-visible");
     this.render();
+  }
+
+  // Toggle "linked notes" mode. Mutually exclusive with search (leaving search if open).
+  private toggleLinks(): void {
+    this.linksMode = !this.linksMode;
+    this.linksToggleEl.toggleClass("is-active", this.linksMode);
+    if (this.searchRowEl.hasClass("is-visible") || this.searchQuery) {
+      this.scheduleSearch.cancel();
+      this.searchInputEl.value = "";
+      this.searchQuery = "";
+      this.searchRowEl.removeClass("is-visible");
+    }
+    this.render();
+  }
+
+  // Show the notes the active note links to (resolved wikilinks) as cards. For a MOC
+  // this is its member list — the structural counterpart to similarity ranking.
+  private renderLinks(active: TFile): void {
+    this.subtitleEl.empty();
+    this.subtitleEl.appendText("Linked from ");
+    this.subtitleEl.createSpan({ cls: "rn-based-on", text: active.basename });
+
+    const resolved = this.app.metadataCache.resolvedLinks[active.path] ?? {};
+    const targets: TFile[] = [];
+    const seen = new Set<string>();
+    for (const path of Object.keys(resolved)) {
+      if (seen.has(path)) continue;
+      seen.add(path);
+      const f = this.app.vault.getAbstractFileByPath(path);
+      if (f instanceof TFile && f.extension === "md") targets.push(f);
+    }
+    if (targets.length === 0) {
+      this.renderEmpty("This note doesn't link to any notes yet.");
+      return;
+    }
+    for (const file of targets) this.renderLinkCard(file);
+  }
+
+  private renderLinkCard(file: TFile): void {
+    const card = this.listEl.createDiv({ cls: "rn-card" });
+    const top = card.createDiv({ cls: "rn-card-top" });
+    top.createDiv({ cls: "rn-title", text: file.basename });
+    const pills = card.createDiv({ cls: "rn-pills" });
+    pills.createSpan({ cls: "rn-conn rn-conn-linked", text: "Linked" });
+    const parentPath = file.parent?.path ?? "";
+    if (parentPath.length > 0 && parentPath !== "/") {
+      card.createDiv({ cls: "rn-path", text: parentPath });
+    }
+    card.addEventListener("click", () => {
+      void this.app.workspace.getLeaf(false).openFile(file);
+    });
   }
 
   // Semantic search: rank notes by similarity to the typed query (keyword fallback

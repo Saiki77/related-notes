@@ -46,9 +46,14 @@
   align-items: center;
   gap: var(--size-2-2);
 }
-.related-notes-view .rn-search-toggle {
+.related-notes-view .rn-search-toggle,
+.related-notes-view .rn-links-toggle {
   color: var(--text-muted);
   cursor: pointer;
+}
+/* Active mode (e.g. linked-notes mode on) reads as accent so the toggle's state is clear. */
+.related-notes-view .rn-links-toggle.is-active {
+  color: var(--interactive-accent);
 }
 .related-notes-view .rn-search-row {
   display: none;
