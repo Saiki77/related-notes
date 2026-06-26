@@ -267,6 +267,10 @@ export interface StoredEntryMeta {
   scales: number[]; // one fp32 scale per chunk row
   summaryLabel?: string;
   chunkTexts?: string[];
+  // Idea grouping: one idea id per chunk row (row 0 = title = idea 0; body ideas are
+  // 1..K, contiguous). Lets ranking aggregate windows into ~200-500-word ideas. Lives
+  // in the JSON manifest (small ints), NOT the blob, so the binary layout is unchanged.
+  ideaOf?: number[];
   meanOffset: number; // byte offset of the fp32 mean vector (always %4 === 0)
   chunkOffset: number; // byte offset of the int8 chunk buffer
 }
@@ -298,6 +302,7 @@ export interface SerializableEntry {
   scales: number[];
   chunkTexts?: string[];
   summaryLabel?: string;
+  ideaOf?: number[];
 }
 
 // A deserialized in-memory entry. The vectors are VIEWS into the one shared blob
@@ -314,6 +319,7 @@ export interface DeserializedEntry {
   scales: number[];
   chunkTexts?: string[];
   summaryLabel?: string;
+  ideaOf?: number[];
 }
 
 export interface SerializeMeta {
@@ -363,6 +369,7 @@ export function serializeIndex(
       scales: e.scales,
       meanOffset,
       chunkOffset: 0, // filled in the chunks pass below
+      ...(e.ideaOf ? { ideaOf: e.ideaOf } : {}),
       ...(meta.hasChunkText && e.chunkTexts ? { chunkTexts: e.chunkTexts } : {}),
       ...(meta.hasChunkText && e.summaryLabel
         ? { summaryLabel: e.summaryLabel }
@@ -419,6 +426,7 @@ export function serializeManifest(
       scales: e.scales,
       meanOffset,
       chunkOffset: 0,
+      ...(e.ideaOf ? { ideaOf: e.ideaOf } : {}),
       ...(meta.hasChunkText && e.chunkTexts ? { chunkTexts: e.chunkTexts } : {}),
       ...(meta.hasChunkText && e.summaryLabel
         ? { summaryLabel: e.summaryLabel }
@@ -465,6 +473,11 @@ export function deserializeIndex(
     if (meta.scales.length !== meta.chunkCount) continue;
     const meanVector = new Float32Array(blob, meta.meanOffset, meanLen);
     const chunkBytes = new Int8Array(blob, meta.chunkOffset, chunkLen);
+    // Guard: ideaOf must cover every row or it is ignored (rank falls back to biMax).
+    const ideaOf =
+      meta.ideaOf && meta.ideaOf.length === meta.chunkCount
+        ? meta.ideaOf
+        : undefined;
     out.push({
       path: meta.path,
       mtime: meta.mtime,
@@ -475,6 +488,7 @@ export function deserializeIndex(
       scales: meta.scales,
       chunkTexts: meta.chunkTexts,
       summaryLabel: meta.summaryLabel,
+      ideaOf,
     });
   }
   return { header, entries: out };

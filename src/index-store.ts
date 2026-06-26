@@ -35,7 +35,7 @@ import {
 // byte-for-byte the old load-time dequant, so ranking results are identical; only
 // memory + load time change.
 // =============================================================================
-const INDEX_VERSION = 6 as const;
+const INDEX_VERSION = 7 as const;
 
 // The small JSON manifest (header + per-entry metadata + scales + chunkTexts) and
 // the binary blob (all fp32 means + all int8 chunk buffers). Written/renamed via
@@ -57,6 +57,30 @@ const MIN_WINDOW_WORDS = 10;
 // window above this is split at sentence, then whitespace, boundaries so the model
 // never silently truncates a chunk's tail and every chunk stays in-distribution.
 const MAX_CHUNK_CHARS = 480;
+
+// --- idea grouping ----------------------------------------------------------
+// A paragraph is a poor unit (often 1-2 sentences); a self-contained IDEA runs
+// ~200-500 words and may span paragraphs. assignIdeas() groups consecutive <=480-char
+// windows into ideas at heading + lexical-cohesion boundaries, bounded by size rails,
+// so ranking can compare notes at idea granularity (an aggregate idea vector) on top
+// of the per-window biMax. The embed unit stays the window (no truncation); ideas are
+// a logical grouping, ranked via a rank-time blend weight (IndexStoreOptions.ideaInfluence).
+const ATOMIC_NOTE_WORDS = 180; // body below this -> ONE idea (don't fragment atomic notes)
+const MIN_IDEA_WINDOWS_FOR_CUT = 2; // never open a new idea after a single window
+const MIN_IDEA_WORDS = 100; // coalesce ideas below this (overlap-inflated count ~= 80 true
+// words) into a neighbor, so bullet-heavy notes reach the ~200-500-word idea target
+// instead of leaving 40-word fragments barely bigger than a single window.
+const MAX_IDEA_WINDOWS = 8; // hard size rail (~400-500 words); bounds an idea's span
+const MIN_LEXICAL_WINDOWS = 6; // need at least this many body windows to trust valleys
+// Tiny DE+EN stopword set for lexical-cohesion overlap (content words only).
+const IDEA_STOPWORDS = new Set([
+  "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "her", "was",
+  "one", "our", "out", "has", "had", "his", "him", "she", "they", "them", "this",
+  "that", "with", "from", "have", "were", "their", "then", "than", "into", "your",
+  "der", "die", "das", "und", "ist", "ein", "eine", "einen", "einem", "einer", "den",
+  "dem", "des", "mit", "auf", "für", "nicht", "auch", "sich", "wird", "wie", "aus",
+  "oder", "aber", "als", "bei", "nach", "von", "vor", "durch", "noch", "nur", "schon",
+]);
 
 // Title chunk lives at index 0 of every note's chunk buffer and is weighted ~2x in
 // the per-direction BiMax means so a strong title match lifts the score.
@@ -180,6 +204,7 @@ interface IndexEntry {
   chunkBytes: Int8Array; // length == chunkCount * dims, int8-quantized rows
   scales: number[]; // length == chunkCount, one fp32 scale per row
   chunkTexts?: string[];
+  ideaOf?: number[]; // length == chunkCount; idea id per row (0 = title idea, body 1..K)
   // The note's topic LABEL (3–7 words). With LAZY labels it is computed on FIRST
   // getSummary() demand (not at build), persisted, and re-rendered when ready.
   // Present only when summaries are on. Undefined until first computed.
@@ -235,6 +260,7 @@ export interface IndexStoreOptions {
   shortlistSize: number; // Stage-1 -> Stage-2 funnel width
   showSummary: boolean; // persist chunkTexts so summaries survive a reload
   headingContext: boolean; // prefix each section's first chunk with a heading breadcrumb
+  ideaInfluence: number; // 0..~0.6 rank-time blend of idea-level MaxSim into biMax (0 = off)
 }
 
 type ProgressListener = (p: IndexProgress) => void;
@@ -245,6 +271,7 @@ interface NoteChunk {
   isTitle: boolean;
   heading?: string; // breadcrumb "Note > H1 > H2" of the owning section (in-memory)
   embedText?: string; // what to actually embed (heading-context-prefixed); text if unset
+  ideaId?: number; // body-idea group id (assigned pre-cap by assignIdeas; in-memory)
 }
 
 // What to feed the embedder for a chunk: the heading-context-prefixed input when set,
@@ -496,6 +523,154 @@ export function splitToBudget(text: string): string[] {
   }
   pushBuf();
   return out.length > 0 ? out : [text];
+}
+
+// Content-word set of a window (lowercased, stopwords + sub-3-char dropped) for the
+// lexical-cohesion overlap. Letters incl. German umlauts + ß; digits kept.
+function contentWords(text: string): Set<string> {
+  const set = new Set<string>();
+  for (const w of text.toLowerCase().split(/[^0-9a-zà-ÿ]+/)) {
+    if (w.length >= 3 && !IDEA_STOPWORDS.has(w)) set.add(w);
+  }
+  return set;
+}
+
+function jaccard(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let inter = 0;
+  for (const w of a) if (b.has(w)) inter++;
+  return inter / (a.size + b.size - inter);
+}
+
+// Coalesce undersized ideas (fewer than MIN_IDEA_WINDOWS_FOR_CUT windows OR fewer than
+// MIN_IDEA_WORDS words) into the smaller adjacent idea, then relabel ideas 0..K
+// contiguously. Kills the context-poor fragments — both 1-window leftovers and the
+// 40-word bullet "ideas" — that are the "a paragraph is often one sentence" complaint;
+// growth stops once a group clears the word floor, so ideas converge on the target size
+// without over-merging into one blob. Ideas are contiguous runs. O(n^2), n<=48.
+function mergeSmallIdeas(bodyChunks: NoteChunk[]): void {
+  let groups: [number, number][] = [];
+  let s = 0;
+  for (let i = 1; i <= bodyChunks.length; i++) {
+    if (i === bodyChunks.length || bodyChunks[i].ideaId !== bodyChunks[i - 1].ideaId) {
+      groups.push([s, i]);
+      s = i;
+    }
+  }
+  const windows = (g: [number, number]): number => g[1] - g[0];
+  const words = (g: [number, number]): number => {
+    let w = 0;
+    for (let i = g[0]; i < g[1]; i++) w += countWords(bodyChunks[i].text);
+    return w;
+  };
+  const tooSmall = (g: [number, number]): boolean =>
+    windows(g) < MIN_IDEA_WINDOWS_FOR_CUT || words(g) < MIN_IDEA_WORDS;
+  let changed = true;
+  while (groups.length > 1 && changed) {
+    changed = false;
+    for (let gi = 0; gi < groups.length; gi++) {
+      if (!tooSmall(groups[gi])) continue;
+      const prev = gi > 0 ? gi - 1 : -1;
+      const next = gi < groups.length - 1 ? gi + 1 : -1;
+      let target: number;
+      if (prev >= 0 && next >= 0)
+        target = windows(groups[prev]) <= windows(groups[next]) ? prev : next;
+      else target = prev >= 0 ? prev : next;
+      const lo = Math.min(groups[gi][0], groups[target][0]);
+      const hi = Math.max(groups[gi][1], groups[target][1]);
+      groups.splice(Math.min(gi, target), 2, [lo, hi]);
+      changed = true;
+      break;
+    }
+  }
+  for (let g = 0; g < groups.length; g++) {
+    for (let i = groups[g][0]; i < groups[g][1]; i++) bodyChunks[i].ideaId = g;
+  }
+}
+
+// Group consecutive body windows into coherent ~200-500-word IDEAS and stamp each
+// chunk.ideaId (0-based, contiguous). Runs PRE-CAP on the full window stream so
+// boundary signals use true text adjacency. Pure text (no embeddings) -> deterministic
+// and model-independent (ideas don't shift when the embedding model is swapped, which
+// keeps an A/B between models clean). Boundaries: heading changes + lexical-cohesion
+// valleys, gated by size rails; atomic notes collapse to one idea.
+function assignIdeas(bodyChunks: NoteChunk[]): void {
+  const n = bodyChunks.length;
+  if (n === 0) return;
+
+  // Atomic-note guard: short notes (e.g. math/technical atoms) are ONE idea.
+  let totalWords = 0;
+  for (const c of bodyChunks) totalWords += countWords(c.text);
+  if (n <= 3 || totalWords < ATOMIC_NOTE_WORDS) {
+    for (const c of bodyChunks) c.ideaId = 0;
+    return;
+  }
+
+  const sets = bodyChunks.map((c) => contentWords(c.text));
+  const overlaps: number[] = []; // overlaps[i] = cohesion between window i and i+1
+  for (let i = 0; i < n - 1; i++) overlaps.push(jaccard(sets[i], sets[i + 1]));
+
+  // Adaptive lexical-valley threshold (only trusted with enough windows; below that
+  // rely on headings + size rails, so small notes are deterministic).
+  let valleyThr = -1;
+  if (n >= MIN_LEXICAL_WINDOWS) {
+    let mean = 0;
+    for (const o of overlaps) mean += o;
+    mean /= overlaps.length;
+    let varSum = 0;
+    for (const o of overlaps) varSum += (o - mean) * (o - mean);
+    const sd = Math.sqrt(varSum / overlaps.length);
+    valleyThr = mean - 0.5 * sd;
+  }
+
+  let idea = 0;
+  let curWindows = 0;
+  for (let i = 0; i < n; i++) {
+    if (i > 0) {
+      const headingChanged = bodyChunks[i].heading !== bodyChunks[i - 1].heading;
+      const lexicalValley = valleyThr >= 0 && overlaps[i - 1] < valleyThr;
+      const hardSize = curWindows >= MAX_IDEA_WINDOWS;
+      const softCut =
+        (headingChanged || lexicalValley) && curWindows >= MIN_IDEA_WINDOWS_FOR_CUT;
+      if (hardSize || softCut) {
+        idea++;
+        curWindows = 0;
+      }
+    }
+    bodyChunks[i].ideaId = idea;
+    curWindows++;
+  }
+
+  mergeSmallIdeas(bodyChunks);
+}
+
+// Aggregate centered window rows into per-idea vectors (L2-normalized mean of each
+// idea's windows), ordered by idea id (0 = title idea). Built from the SAME centered
+// rows biMax consumes, so the idea layer lives in the same geometry as the window
+// layer it complements. Returns the vectors buffer + idea count.
+function aggregateIdeaVectors(
+  chunks: Float32Array,
+  ideaOf: number[],
+  chunkCount: number,
+  dims: number,
+): { vecs: Float32Array; count: number } {
+  let maxId = 0;
+  for (let c = 0; c < chunkCount; c++) if (ideaOf[c] > maxId) maxId = ideaOf[c];
+  const count = maxId + 1;
+  const vecs = new Float32Array(count * dims);
+  for (let c = 0; c < chunkCount; c++) {
+    const off = c * dims;
+    const voff = ideaOf[c] * dims;
+    for (let d = 0; d < dims; d++) vecs[voff + d] += chunks[off + d];
+  }
+  for (let k = 0; k < count; k++) {
+    const o = k * dims;
+    let norm = 0;
+    for (let d = 0; d < dims; d++) norm += vecs[o + d] * vecs[o + d];
+    norm = Math.sqrt(norm);
+    if (norm > 0) for (let d = 0; d < dims; d++) vecs[o + d] /= norm;
+  }
+  return { vecs, count };
 }
 
 // =============================================================================
@@ -971,6 +1146,7 @@ export class IndexStore {
           scales: e.scales,
           chunkTexts: e.chunkTexts,
           summaryLabel: e.summaryLabel,
+          ideaOf: e.ideaOf,
         });
       }
       this.entries = loaded;
@@ -1214,6 +1390,10 @@ export class IndexStore {
       });
     }
 
+    // Group windows into ideas on the FULL pre-cap stream (true text adjacency) so the
+    // ideaId stamped on each surviving chunk is correct even after the cap drops some.
+    assignIdeas(bodyChunks);
+
     const cap = this.maxChunks;
     if (bodyChunks.length <= cap) {
       chunks.push(...bodyChunks);
@@ -1409,6 +1589,28 @@ export class IndexStore {
     // DequantCache only if/when this note enters a Stage-2 shortlist.
     const { q, scales } = quantizeChunksRaw(buffer, count, dims);
 
+    // Idea map: row 0 (title) is its own idea 0; body chunks carry an in-memory ideaId
+    // (assigned pre-cap). Compact distinct surviving body ideas to 1..K in order so the
+    // stored ideaOf is contiguous and idea 0 is always the title (matches the biMax
+    // title-weight contract). Only when chunking is on (the chunking-off path emits a
+    // single un-grouped body blob, so idea ranking stays inert and rank falls to biMax).
+    let ideaOf: number[] | undefined;
+    if (count > 1 && this.options.chunking) {
+      ideaOf = new Array<number>(count);
+      ideaOf[0] = 0;
+      const remap = new Map<number, number>();
+      let nextId = 1;
+      for (let c = 1; c < count; c++) {
+        const bid = chunks[c]?.ideaId ?? 0;
+        let mapped = remap.get(bid);
+        if (mapped === undefined) {
+          mapped = nextId++;
+          remap.set(bid, mapped);
+        }
+        ideaOf[c] = mapped;
+      }
+    }
+
     return {
       path: file.path,
       mtime: file.stat.mtime,
@@ -1418,6 +1620,7 @@ export class IndexStore {
       chunkBytes: q,
       scales,
       chunkTexts: this.options.showSummary ? chunks.map((c) => c.text) : undefined,
+      ideaOf,
     };
   }
 
@@ -1693,7 +1896,17 @@ export class IndexStore {
       // rank. A DIRECTLY LINKED note is relevant by the user's own connection, so it
       // keeps full semantic weight; only purely-discovered notes get the penalty.
       const confidence = signals.directLink ? 1 : this.contentConfidence(entry);
-      const semantic = this.biMax(self, entry) * confidence;
+      // Window-level biMax is the precision signal. When idea grouping is on, blend in
+      // the coarser idea-level MaxSim (a "shared coherent idea" signal) at the user's
+      // ideaInfluence weight — a pure rank-time knob (no re-embed), so it can be A/B'd
+      // live by sliding it. 0 == exact pre-idea behavior.
+      const base = this.biMax(self, entry);
+      const w = this.options.ideaInfluence;
+      const blended =
+        w > 0 && self.ideaOf && entry.ideaOf
+          ? (1 - w) * base + w * this.ideaMaxSim(self, entry)
+          : base;
+      const semantic = blended * confidence;
       // signals.raw is already clamped to [0,1], so raw * bMax <= bMax; no extra cap.
       const boost = bMax > 0 ? signals.raw * bMax : 0;
       const finalScore = Math.min(1, semantic + boost);
@@ -1803,6 +2016,29 @@ export class IndexStore {
       den += w;
     }
     return den > 0 ? num / den : 0;
+  }
+
+  // Idea-level counterpart of biMax: aggregate each note's windows into idea vectors
+  // (L2-normalized mean of its centered window rows) and take symmetric bidirectional
+  // MaxSim over those, title idea (id 0) weighted TITLE_WEIGHT via directionalMax.
+  // Coarser than window biMax: it asks "do these notes share a whole coherent IDEA",
+  // which a single best-window match can miss. Used only as a rank-time blend
+  // (ideaInfluence); the window layer stays the precision signal. Reuses the dequant
+  // LRU (already warmed by biMax in the same iteration) and the same centered geometry.
+  private ideaMaxSim(a: IndexEntry, b: IndexEntry): number {
+    const dims = a.dims;
+    if (b.dims !== dims || !a.ideaOf || !b.ideaOf) return this.biMax(a, b);
+    if (a.chunkCount === 0 || b.chunkCount === 0) return 0;
+    const aChunks = this.dequant.get(a);
+    const bChunks = this.dequant.get(b);
+    const ai = aggregateIdeaVectors(aChunks, a.ideaOf, a.chunkCount, dims);
+    const bi = aggregateIdeaVectors(bChunks, b.ideaOf, b.chunkCount, dims);
+    // ideaOf implies chunkCount > 1, and assembleEntry always emits title idea 0 plus
+    // at least one body idea, so both counts are >= 2 here — no title-only stub branch
+    // is needed (unlike biMax, which must ground a 1-chunk empty note in the mean).
+    const aToB = this.directionalMax(ai.vecs, ai.count, bi.vecs, bi.count, dims);
+    const bToA = this.directionalMax(bi.vecs, bi.count, ai.vecs, ai.count, dims);
+    return (aToB + bToA) / 2;
   }
 
   // --- hybrid structural boost ----------------------------------------------

@@ -26,13 +26,16 @@ languages naturally.
 
 ## How it works
 
-Each Markdown note is split into coherent **idea-chunks** — at heading and paragraph
-boundaries, covering the whole note — and every chunk is turned into a vector by the
-embedding model. A note is represented by both an **overall vector** and its **chunk
-vectors**, so another note can match it section-by-section, not just as a whole. For
-the note you're viewing, every other note is ranked by the best **cosine similarity**
-of their chunks (with its title weighted), and the closest matches are shown as cards
-with a similarity percentage.
+Each Markdown note is split into short passages (windows that fit the model's context),
+covering the whole note, and every passage is turned into a vector by the embedding
+model. Adjacent passages are then grouped into coherent **ideas** (~200-500 words, at
+heading and topic boundaries, with short atomic notes kept whole), so a note is
+represented at three levels: an **overall vector**, its **idea vectors**, and its
+**passage vectors**. For the note you're viewing, every other note is ranked by the
+best **cosine similarity** of their passages (with its title weighted), blended with
+how strongly the two notes share a whole **idea** — so a note related by one coherent
+idea spanning several paragraphs surfaces, not just one lucky passage match. The
+closest matches are shown as cards with a similarity percentage.
 
 The model runs through [`@huggingface/transformers`](https://www.npmjs.com/package/@huggingface/transformers)
 on the local ONNX runtime, on the **CPU via WASM** by default, multi-threaded so a
@@ -106,7 +109,11 @@ Next up, going beyond *reading* related notes to *tidying the graph* itself:
 - **Minimum similarity**: hide matches below this topical-similarity score (0–1).
   Scores are mean-centered (the embedding noise floor is removed), so unrelated notes
   sit near 0 and ~0.2 cleanly separates on-topic notes. Raise for a tighter list.
-- **Max chunks per note** (advanced): ceiling on idea-chunks embedded per note. The
+- **Idea influence**: how much idea-level matching blends into the score (0-0.6).
+  Notes are grouped into coherent ideas (~200-500 words); this weights whether two
+  notes share a whole idea, not just one passage. 0 is passage-only. It is a live
+  ranking knob — changing it re-ranks instantly with no re-index, so you can compare.
+- **Max chunks per note** (advanced): ceiling on passages embedded per note. The
   whole note is covered up to this cap; only very long notes approach it.
 - **Heading context** (advanced): embeds each section's first chunk with its note +
   heading breadcrumb for context. On by default; toggle to compare.

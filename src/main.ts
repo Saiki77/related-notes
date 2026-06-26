@@ -82,6 +82,7 @@ export interface RelatedNotesSettings {
   maxChunks: number; // body-chunk cap (advanced)
   shortlistSize: number; // Stage-1 -> Stage-2 funnel width (advanced)
   headingContext: boolean; // prefix each section's first chunk with a heading breadcrumb
+  ideaInfluence: number; // 0..0.6 rank-time blend of idea-level similarity (0 = off; live, no re-embed)
   // --- linking (Features A + B) ---
   glowEnabled: boolean; // inline glow + 1-click link (Feature A)
   glowRestrictToLivePreview: boolean; // only decorate live preview
@@ -120,6 +121,7 @@ export const DEFAULT_SETTINGS: RelatedNotesSettings = {
   maxChunks: 48,
   shortlistSize: 60,
   headingContext: true,
+  ideaInfluence: 0.3,
   // Precision-first, low-risk behaviors ON; riskier ones OFF. suggesterTakeOver's
   // effective default is computed against easy-links at layout-ready (see
   // resolveSuggesterTakeOver) so we don't fight it; the stored value is the
@@ -164,6 +166,7 @@ const PROFILES: Record<ProfileName, Partial<RelatedNotesSettings>> = {
     structureInfluence: 0.15,
     maxChunks: 48,
     headingContext: true,
+    ideaInfluence: 0.3,
   },
   best: {
     modelId: "Xenova/paraphrase-multilingual-mpnet-base-v2",
@@ -176,6 +179,7 @@ const PROFILES: Record<ProfileName, Partial<RelatedNotesSettings>> = {
     structureInfluence: 0.2,
     maxChunks: 64,
     headingContext: true,
+    ideaInfluence: 0.35,
   },
 };
 
@@ -758,6 +762,7 @@ export default class RelatedNotesPlugin extends Plugin {
       shortlistSize: this.settings.shortlistSize,
       showSummary: this.settings.showSummary,
       headingContext: this.settings.headingContext,
+      ideaInfluence: this.settings.ideaInfluence,
     };
   }
 
@@ -1000,6 +1005,29 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.minSimilarity)
           .onChange((v) => {
             this.plugin.settings.minSimilarity = v;
+            valueEl.setText(fmt(v));
+            this.debouncedSave();
+          }),
+      );
+    }
+
+    {
+      const setting = new Setting(containerEl)
+        .setName("Idea influence")
+        .setDesc(
+          "How much idea-level matching blends into the score. Notes are grouped into coherent ideas (~200-500 words); this weights whether two notes share a whole idea, not just one lucky passage. 0 = passage-only (the prior behavior). Live ranking knob — changing it re-ranks instantly, no re-index, so you can compare on your own notes.",
+        );
+      const fmt = (v: number) => v.toFixed(2);
+      const valueEl = setting.controlEl.createSpan({
+        cls: "related-notes-slider-value",
+        text: fmt(this.plugin.settings.ideaInfluence),
+      });
+      setting.addSlider((s) =>
+        s
+          .setLimits(0, 0.6, 0.05)
+          .setValue(this.plugin.settings.ideaInfluence)
+          .onChange((v) => {
+            this.plugin.settings.ideaInfluence = v;
             valueEl.setText(fmt(v));
             this.debouncedSave();
           }),
