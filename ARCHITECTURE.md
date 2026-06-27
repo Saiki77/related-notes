@@ -6,22 +6,9 @@ vectors, how related notes are ranked, and where it is heading next. Everything 
 WASM by default); no note ever leaves your vault and the only network traffic is the
 one-time model-weights download.
 
-```mermaid
-flowchart TD
-  N["Note: title, body, tags"] --> S["Sections (by heading)"]
-  S --> I["Ideas (~200-500 words)"]
-  I --> P["Passages (token-safe windows)"]
-  P --> E{{"Embed: multi-granularity"}}
-  E --> WV["Whole-note vector"]
-  E --> IV["Idea vectors"]
-  E --> PV["Passage vectors"]
-  WV --> R1["Stage 1: overall-vector shortlist"]
-  IV --> R1
-  PV --> R1
-  R1 --> R2["Stage 2: best idea / passage match"]
-  R2 --> B["+ structural boost (links, tags, recency)"]
-  B --> C["Ranked cards"]
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="The chunk-embed-rank pipeline and the concept search: an example saga's notes form character, location and item clusters in embedding space with no tags, and a 'characters' query expands from the index note to the member notes" width="760">
+</p>
 
 ## 1. Chunking — structure-aware, idea-first
 
@@ -124,11 +111,7 @@ widely and expensive compute narrowly:
 The hardest open problem: a query like "characters" or "locations" should return the
 **member** notes, and it must work even when the user has no tags, no map-of-content
 notes, and no useful link graph — by inferring the latent category from the vault's own
-patterns.
-
-<p align="center">
-  <img src="concept-search.svg" alt="A query is expanded from the index note toward the members' region of an inferred cluster" width="820">
-</p>
+patterns (the bottom half of the diagram above).
 
 Plain cosine is symmetric and ranks hypernyms poorly, so a note *about* characters
 always beats an individual character on "cosine to characters". The fix is

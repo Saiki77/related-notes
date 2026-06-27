@@ -27,7 +27,7 @@ languages naturally.
 ## How it works
 
 <p align="center">
-  <img src="docs/concept-search.svg" alt="Inferring a vault's structure to answer a concept query: character, location and system notes form latent clusters in embedding space with no tags; a query 'characters' expands from the index note toward the members' region and returns the individual character notes" width="820">
+  <img src="docs/architecture.svg" alt="The chunk-embed-rank pipeline, and the concept search: an example saga's notes form character, location and item clusters in embedding space with no tags, and a 'characters' query expands from the index note to the member notes" width="760">
 </p>
 
 Each Markdown note is split into short passages (windows that fit the model's context),

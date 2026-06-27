@@ -1,0 +1,90 @@
+<svg width="100%" viewBox="0 0 680 866" role="img" xmlns="http://www.w3.org/2000/svg">
+<title>Smart Related Notes: the chunk-embed-rank pipeline and the concept-search that infers a vault's latent structure</title>
+<desc>Top: a note is chunked into sections, ideas and passages, embedded at three granularities, and ranked by a multi-stage funnel. Bottom: an example saga's notes form character, location and item clusters in embedding space with no tags, and a "characters" query expands from the index note to the member notes.</desc>
+<style>
+text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;}
+.h{font-size:16px;font-weight:500;}.sh{font-size:14px;font-weight:500;}.mut{font-size:12px;}.bx{font-size:13px;font-weight:500;}.chp{font-size:11px;}
+.map{fill:none;stroke:#d1d5db;}.div{stroke:#e5e7eb;}
+.cA{fill:#e8f0fe;stroke:#4285f4;}.cB{fill:#ddf5f0;stroke:#14b8a6;}.cC{fill:#fdf0d8;stroke:#f59e0b;}.cG{fill:#e6f4ea;stroke:#34a853;}.cI{fill:#eef1f4;stroke:#94a3b8;}
+.chip{fill:#ffffff;stroke:#e5e7eb;}
+.tInk{fill:#1f2937;}.tMut{fill:#6b7280;}.tA{fill:#1a3a8f;}.tB{fill:#0f5f57;}.tC{fill:#8a5a06;}.tG{fill:#1e6b34;}.tI{fill:#475569;}
+.arw{stroke:#9ca3af;stroke-width:1.5;fill:none;}.arwf{fill:#9ca3af;}
+@media (prefers-color-scheme:dark){
+.map{stroke:#374151;}.div{stroke:#374151;}
+.cA{fill:#16233f;stroke:#5b8def;}.cB{fill:#0c2a27;stroke:#2dd4bf;}.cC{fill:#342810;stroke:#fbbf24;}.cG{fill:#11301d;stroke:#4ade80;}.cI{fill:#1f2733;stroke:#64748b;}
+.chip{fill:#0f1623;stroke:#374151;}
+.tInk{fill:#e5e7eb;}.tMut{fill:#9ca3af;}.tA{fill:#bcd0ff;}.tB{fill:#99f6e4;}.tC{fill:#fde68a;}.tG{fill:#86efac;}.tI{fill:#cbd5e1;}
+.arw{stroke:#6b7280;}.arwf{fill:#6b7280;}
+}
+</style>
+<defs><marker id="m" markerWidth="8" markerHeight="8" refX="5.5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6 Z" class="arwf"/></marker></defs>
+
+<text class="h tInk" x="40" y="30">How Smart Related Notes works</text>
+<text class="mut tMut" x="40" y="50">structure-aware chunking, multi-granularity embeddings, and a multi-stage ranking funnel — local and offline</text>
+
+<text class="mut tMut" x="40" y="90">1 · chunk — structure-aware</text>
+<rect class="cA" x="40" y="100" width="86" height="46" rx="8"/><text class="bx tA" x="83" y="124" text-anchor="middle">Note</text><text class="chp tA" x="83" y="138" text-anchor="middle">title, body, tags</text>
+<rect class="cA" x="150" y="100" width="104" height="46" rx="8"/><text class="bx tA" x="202" y="124" text-anchor="middle">Sections</text><text class="chp tA" x="202" y="138" text-anchor="middle">by heading</text>
+<rect class="cA" x="282" y="100" width="104" height="46" rx="8"/><text class="bx tA" x="334" y="124" text-anchor="middle">Ideas</text><text class="chp tA" x="334" y="138" text-anchor="middle">~200-500 words</text>
+<rect class="cA" x="414" y="100" width="124" height="46" rx="8"/><text class="bx tA" x="476" y="124" text-anchor="middle">Passages</text><text class="chp tA" x="476" y="138" text-anchor="middle">token-safe windows</text>
+<line class="arw" x1="126" y1="123" x2="148" y2="123" marker-end="url(#m)"/>
+<line class="arw" x1="254" y1="123" x2="280" y2="123" marker-end="url(#m)"/>
+<line class="arw" x1="386" y1="123" x2="412" y2="123" marker-end="url(#m)"/>
+<line class="arw" x1="300" y1="146" x2="300" y2="172" marker-end="url(#m)"/>
+
+<text class="mut tMut" x="40" y="186">2 · embed — multi-granularity · int8 · mean-centered · MiniLM or jina-v5</text>
+<rect class="cB" x="40" y="196" width="182" height="46" rx="8"/><text class="bx tB" x="131" y="220" text-anchor="middle">Whole-note vector</text><text class="chp tB" x="131" y="234" text-anchor="middle">the note's gist</text>
+<rect class="cB" x="244" y="196" width="156" height="46" rx="8"/><text class="bx tB" x="322" y="220" text-anchor="middle">Idea vectors</text><text class="chp tB" x="322" y="234" text-anchor="middle">one per idea</text>
+<rect class="cB" x="424" y="196" width="182" height="46" rx="8"/><text class="bx tB" x="515" y="220" text-anchor="middle">Passage vectors</text><text class="chp tB" x="515" y="234" text-anchor="middle">fine detail</text>
+<line class="arw" x1="300" y1="242" x2="300" y2="268" marker-end="url(#m)"/>
+
+<text class="mut tMut" x="40" y="282">3 · rank — multi-stage funnel</text>
+<rect class="cA" x="40" y="292" width="128" height="46" rx="8"/><text class="bx tA" x="104" y="316" text-anchor="middle">Stage 1</text><text class="chp tA" x="104" y="330" text-anchor="middle">overall cosine</text>
+<rect class="cA" x="190" y="292" width="150" height="46" rx="8"/><text class="bx tA" x="265" y="316" text-anchor="middle">Stage 2</text><text class="chp tA" x="265" y="330" text-anchor="middle">best idea / passage</text>
+<rect class="cA" x="362" y="292" width="114" height="46" rx="8"/><text class="bx tA" x="419" y="316" text-anchor="middle">+ boost</text><text class="chp tA" x="419" y="330" text-anchor="middle">links, tags</text>
+<rect class="cG" x="498" y="292" width="110" height="46" rx="8"/><text class="bx tG" x="553" y="316" text-anchor="middle">Cards</text><text class="chp tG" x="553" y="330" text-anchor="middle">ranked</text>
+<line class="arw" x1="168" y1="315" x2="188" y2="315" marker-end="url(#m)"/>
+<line class="arw" x1="340" y1="315" x2="360" y2="315" marker-end="url(#m)"/>
+<line class="arw" x1="476" y1="315" x2="496" y2="315" marker-end="url(#m)"/>
+
+<line class="div" x1="40" y1="364" x2="640" y2="364"/>
+
+<text class="sh tInk" x="40" y="392">Concept search — the members, not the index note</text>
+<text class="mut tMut" x="40" y="412">latent categories inferred from the embeddings; works with no tags and no links</text>
+
+<rect class="map" x="40" y="426" width="600" height="306" rx="12"/>
+<text class="mut tMut" x="56" y="446">your vault in embedding space — example: a fantasy saga</text>
+
+<rect class="cA" x="64" y="456" width="250" height="152" rx="12"/>
+<text class="sh tA" x="76" y="476">characters</text>
+<rect class="chip" x="76" y="486" width="108" height="22" rx="6"/><text class="chp tA" x="130" y="501" text-anchor="middle">Frodo</text>
+<rect class="chip" x="76" y="514" width="108" height="22" rx="6"/><text class="chp tA" x="130" y="529" text-anchor="middle">Gandalf</text>
+<rect class="chip" x="76" y="542" width="108" height="22" rx="6"/><text class="chp tA" x="130" y="557" text-anchor="middle">Aragorn</text>
+<rect class="chip" x="196" y="486" width="106" height="22" rx="6"/><text class="chp tA" x="249" y="501" text-anchor="middle">Samwise</text>
+<rect class="chip" x="196" y="514" width="106" height="22" rx="6"/><text class="chp tA" x="249" y="529" text-anchor="middle">Gollum</text>
+
+<rect class="cB" x="340" y="456" width="280" height="98" rx="12"/>
+<text class="sh tB" x="352" y="476">locations</text>
+<rect class="chip" x="352" y="486" width="120" height="22" rx="6"/><text class="chp tB" x="412" y="501" text-anchor="middle">The Shire</text>
+<rect class="chip" x="352" y="514" width="120" height="22" rx="6"/><text class="chp tB" x="412" y="529" text-anchor="middle">Rivendell</text>
+<rect class="chip" x="480" y="486" width="120" height="22" rx="6"/><text class="chp tB" x="540" y="501" text-anchor="middle">Mordor</text>
+
+<rect class="cC" x="340" y="572" width="280" height="84" rx="12"/>
+<text class="sh tC" x="352" y="592">items</text>
+<rect class="chip" x="352" y="602" width="120" height="22" rx="6"/><text class="chp tC" x="412" y="617" text-anchor="middle">The One Ring</text>
+<rect class="chip" x="480" y="602" width="120" height="22" rx="6"/><text class="chp tC" x="540" y="617" text-anchor="middle">Mithril</text>
+
+<rect class="cI" x="96" y="628" width="226" height="24" rx="12"/><text class="chp tI" x="209" y="644" text-anchor="middle">Characters of Middle-earth (index)</text>
+<text class="mut tMut" x="209" y="676" text-anchor="middle">a note ABOUT the category — the naive top hit</text>
+
+<text class="mut tMut" x="40" y="756">how the query "characters" resolves to its members:</text>
+<rect class="cI" x="40" y="766" width="124" height="50" rx="8"/><text class="bx tInk" x="102" y="789" text-anchor="middle">query</text><text class="chp tMut" x="102" y="805" text-anchor="middle">"characters"</text>
+<line class="arw" x1="164" y1="791" x2="178" y2="791" marker-end="url(#m)"/>
+<rect class="cI" x="180" y="766" width="150" height="50" rx="8"/><text class="bx tI" x="255" y="789" text-anchor="middle">naive hit</text><text class="chp tMut" x="255" y="805" text-anchor="middle">the index note</text>
+<line class="arw" x1="330" y1="791" x2="352" y2="791" marker-end="url(#m)"/>
+<rect class="cC" x="354" y="766" width="146" height="50" rx="8"/><text class="bx tC" x="427" y="789" text-anchor="middle">expand</text><text class="chp tC" x="427" y="805" text-anchor="middle">to the members' region</text>
+<line class="arw" x1="500" y1="791" x2="524" y2="791" marker-end="url(#m)"/>
+<rect class="cA" x="526" y="766" width="114" height="50" rx="8"/><text class="bx tA" x="583" y="789" text-anchor="middle">members</text><text class="chp tA" x="583" y="805" text-anchor="middle">Frodo, Gandalf…</text>
+
+<text class="mut tMut" x="40" y="844">members win because ranking pivots to the cluster's prototype, not the query word — concept search is in design.</text>
+</svg>
