@@ -26,6 +26,10 @@ languages naturally.
 
 ## How it works
 
+<p align="center">
+  <img src="docs/concept-search.svg" alt="Inferring a vault's structure to answer a concept query: character, location and system notes form latent clusters in embedding space with no tags; a query 'characters' expands from the index note toward the members' region and returns the individual character notes" width="820">
+</p>
+
 Each Markdown note is split into short passages (windows that fit the model's context),
 covering the whole note, and every passage is turned into a vector by the embedding
 model. Adjacent passages are then grouped into coherent **ideas** (~200-500 words, at

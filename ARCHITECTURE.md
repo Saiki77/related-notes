@@ -124,14 +124,32 @@ widely and expensive compute narrowly:
 The hardest open problem: a query like "characters" or "locations" should return the
 **member** notes, and it must work even when the user has no tags, no map-of-content
 notes, and no useful link graph — by inferring the latent category from the vault's own
-patterns. The intended approach is a **multi-stage embedding** pipeline:
+patterns.
 
-1. embed the concept query and coarse-retrieve;
-2. **pseudo-relevance feedback** — refine the query toward the centroid of its top hits,
-   pulling in the rest of the latent cluster (the other locations) even though none of
-   them say "I am a location";
-3. **latent clustering / prototype scoring** — rank by *membership* in the discovered
-   cluster, not just raw similarity to the word.
+<p align="center">
+  <img src="concept-search.svg" alt="A query is expanded from the index note toward the members' region of an inferred cluster" width="820">
+</p>
 
-Tags, links, and hubs, when present, only sharpen this; the content-only path is the
-baseline. This is in design, not yet shipped.
+Plain cosine is symmetric and ranks hypernyms poorly, so a note *about* characters
+always beats an individual character on "cosine to characters". The fix is
+**seed-prototype ranking**: instead of scoring against the bare query word, build a
+**prototype** — the centered mean of an inferred set of seed members — and rank by
+closeness to *that*, moving the comparison into the members' own region of the space.
+
+The pipeline layers onto the existing search and can only *add* recall (it unions with
+the normal result, never demoting a strong direct hit):
+
+1. **Detect** a category query: the top hit is a cohesion-weighted hub (out-degree ×
+   neighbour similarity), or the query routes to a discovered cluster, or it matches a
+   nested tag.
+2. **Seed** — without tags, from the hub's resolved out-neighbours (a map-of-content's
+   links *are* its members) or a discovered content cluster; with tags, also from the
+   matching nested tag. Coherence-gated and capped to avoid drift.
+3. **Prototype-rank** — re-score notes by closeness to the seed prototype (plus a
+   best-passage and a structural member-boost), and *demote* the category-title note so
+   the members win.
+
+When there are no tags and no links, seeds come from **spherical k-means clusters**
+discovered over the centered note means (computed on idle, kept fresh incrementally),
+so the feature still works on pure prose. Tags, links and hubs only **sharpen** it —
+they are never required. This is **in design**, not yet shipped.
