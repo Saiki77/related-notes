@@ -116,6 +116,12 @@ Next up, going beyond *reading* related notes to *tidying the graph* itself:
   Notes are grouped into coherent ideas (~200-500 words); this weights whether two
   notes share a whole idea, not just one passage. 0 is passage-only. It is a live
   ranking knob — changing it re-ranks instantly with no re-index, so you can compare.
+- **Isolated areas**: self-contained areas, one tag namespace per line (e.g. `goa`).
+  A note tagged with an activated namespace (matching `goa` and `goa/character`) only
+  relates to, and takes tag suggestions from, other notes in that area, and never
+  appears in any other note's cards. Notes in no activated area share one pool. A live
+  ranking knob (no re-index). Use it to keep a self-contained project (a novel, a world)
+  from bleeding into unrelated notes.
 - **Max chunks per note** (advanced): ceiling on passages embedded per note. The
   whole note is covered up to this cap; only very long notes approach it.
 - **Heading context** (advanced): embeds each section's first chunk with its note +

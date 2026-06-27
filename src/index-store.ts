@@ -72,6 +72,7 @@ const MIN_IDEA_WORDS = 100; // coalesce ideas below this (overlap-inflated count
 // instead of leaving 40-word fragments barely bigger than a single window.
 const MAX_IDEA_WINDOWS = 8; // hard size rail (~400-500 words); bounds an idea's span
 const MIN_LEXICAL_WINDOWS = 6; // need at least this many body windows to trust valleys
+const EMPTY_AREAS: ReadonlySet<string> = new Set<string>(); // shared "no isolated area" sentinel
 // Tiny DE+EN stopword set for lexical-cohesion overlap (content words only).
 const IDEA_STOPWORDS = new Set([
   "the", "and", "for", "are", "but", "not", "you", "all", "any", "can", "her", "was",
@@ -272,6 +273,7 @@ export interface IndexStoreOptions {
   showSummary: boolean; // persist chunkTexts so summaries survive a reload
   headingContext: boolean; // prefix each section's first chunk with a heading breadcrumb
   ideaInfluence: number; // 0..~0.6 rank-time blend of idea-level MaxSim into biMax (0 = off)
+  isolatedAreas: string[]; // activated tag namespaces that form self-contained partitions
 }
 
 type ProgressListener = (p: IndexProgress) => void;
@@ -1932,10 +1934,15 @@ export class IndexStore {
     // reflects topical — not baseline — similarity; the floor shifts down with them.
     const selfMean = this.centeredMean(self);
     const floor = this.centroid ? COARSE_FLOOR_CENTERED : COARSE_FLOOR;
+    const selfAreas = this.noteAreas(active.path);
     const shortlist: { entry: IndexEntry; coarse: number }[] = [];
     for (const entry of this.entries.values()) {
       if (entry.path === active.path) continue;
       if (entry.dims !== self.dims) continue;
+      // Isolated areas: a note in an activated area (e.g. the self-contained GoA book)
+      // only ever relates to notes in the SAME area, and never appears for notes
+      // outside it. Notes in no activated area share one common pool.
+      if (!this.areaMatch(selfAreas, this.noteAreas(entry.path))) continue;
       const coarse = cosineSimilarity(selfMean, this.centeredMean(entry));
       if (coarse < floor) continue;
       shortlist.push({ entry, coarse });
@@ -2007,6 +2014,29 @@ export class IndexStore {
     for (const t of cache.tags ?? []) set.add(normalizeTag(t.tag));
     if (cache.frontmatter?.tags) addFrontmatterTags(set, cache.frontmatter.tags);
     return set;
+  }
+
+  // The ACTIVATED isolated areas a note belongs to: the top-level namespace of each of
+  // its tags (the part before the first "/", so goa/character -> "goa"), kept only if
+  // that namespace is in options.isolatedAreas. Empty = the note is in the shared pool.
+  private noteAreas(path: string): ReadonlySet<string> {
+    const areas = this.options.isolatedAreas;
+    if (!areas || areas.length === 0) return EMPTY_AREAS;
+    const out = new Set<string>();
+    for (const tag of this.noteTags(path)) {
+      const ns = tag.split("/")[0];
+      if (areas.includes(ns)) out.add(ns);
+    }
+    return out;
+  }
+
+  // Two notes may relate iff they share an isolated area, or BOTH are in the shared
+  // pool (no activated area). A note in an isolated area never crosses to one outside it.
+  private areaMatch(a: ReadonlySet<string>, b: ReadonlySet<string>): boolean {
+    if (a.size === 0 && b.size === 0) return true;
+    if (a.size === 0 || b.size === 0) return false;
+    for (const x of a) if (b.has(x)) return true;
+    return false;
   }
 
   // Vault-level link-building + hygiene pass. For every indexed note it runs the same

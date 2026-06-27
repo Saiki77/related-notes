@@ -88,6 +88,7 @@ export interface RelatedNotesSettings {
   shortlistSize: number; // Stage-1 -> Stage-2 funnel width (advanced)
   headingContext: boolean; // prefix each section's first chunk with a heading breadcrumb
   ideaInfluence: number; // 0..0.6 rank-time blend of idea-level similarity (0 = off; live, no re-embed)
+  isolatedAreas: string; // activated tag namespaces (comma/newline) that form self-contained areas
   // --- linking (Features A + B) ---
   glowEnabled: boolean; // inline glow + 1-click link (Feature A)
   glowRestrictToLivePreview: boolean; // only decorate live preview
@@ -127,6 +128,7 @@ export const DEFAULT_SETTINGS: RelatedNotesSettings = {
   shortlistSize: 60,
   headingContext: true,
   ideaInfluence: 0.3,
+  isolatedAreas: "",
   // Precision-first, low-risk behaviors ON; riskier ones OFF. suggesterTakeOver's
   // effective default is computed against easy-links at layout-ready (see
   // resolveSuggesterTakeOver) so we don't fight it; the stored value is the
@@ -862,7 +864,21 @@ export default class RelatedNotesPlugin extends Plugin {
       showSummary: this.settings.showSummary,
       headingContext: this.settings.headingContext,
       ideaInfluence: this.settings.ideaInfluence,
+      isolatedAreas: this.parseIsolatedAreas(),
     };
+  }
+
+  // Activated isolated-area tag namespaces, normalized (lowercased, leading # and any
+  // sub-path dropped so "#goa/" or "goa/character" all activate the "goa" area).
+  private parseIsolatedAreas(): string[] {
+    return [
+      ...new Set(
+        this.settings.isolatedAreas
+          .split(/[\n,]/)
+          .map((s) => s.trim().replace(/^#/, "").split("/")[0].toLowerCase())
+          .filter((s) => s.length > 0),
+      ),
+    ];
   }
 
   private parseExcludeFolders(): string[] {
@@ -1132,6 +1148,21 @@ export class RelatedNotesSettingTab extends PluginSettingTab {
           }),
       );
     }
+
+    new Setting(containerEl)
+      .setName("Isolated areas (tag namespaces)")
+      .setDesc(
+        "Self-contained areas, one tag namespace per line. A note tagged with an activated namespace (e.g. goa, which matches goa and goa/character) only relates to, and takes tag suggestions from, other notes in that area, and never appears in any other note's cards. Notes in no activated area share one pool. Live ranking knob, no re-index.",
+      )
+      .addTextArea((t) =>
+        t
+          .setPlaceholder("goa")
+          .setValue(this.plugin.settings.isolatedAreas)
+          .onChange((v) => {
+            this.plugin.settings.isolatedAreas = v;
+            this.debouncedSave();
+          }),
+      );
 
     new Setting(containerEl)
       .setName("Excluded folders")
