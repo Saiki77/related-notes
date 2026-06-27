@@ -7,7 +7,7 @@ WASM by default); no note ever leaves your vault and the only network traffic is
 one-time model-weights download.
 
 <p align="center">
-  <img src="docs/architecture.svg" alt="The chunk-embed-rank pipeline and the concept search: an example saga's notes form character, location and item clusters in embedding space with no tags, and a 'characters' query expands from the index note to the member notes" width="760">
+  <img src="docs/architecture.svg" alt="How Smart Related Notes works: how the embedding model infers 'The One Ring' is an item and 'Frodo' a character from their words alone; the chunk-embed-rank pipeline; how vectors become ranks and clusters; and concept search returning the member notes for a category query" width="720">
 </p>
 
 ## 1. Chunking — structure-aware, idea-first
