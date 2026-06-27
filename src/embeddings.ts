@@ -3,7 +3,7 @@ import {
   env,
   type FeatureExtractionPipeline,
 } from "@huggingface/transformers";
-import { ORT_WEB_CDN, ORT_GLUE_JSEP } from "./ort-version";
+import { ORT_WEB_CDN } from "./ort-version";
 import { yieldToUI } from "./async-yield";
 // cosineSimilarity now lives in the dependency-free vector-math module (so the
 // node benchmark can import it without pulling in transformers). Re-exported here
@@ -67,28 +67,22 @@ interface OrtWasmFlags {
   proxy?: boolean;
 }
 
-// Blob URL of the web-patched glue, created once and reused for the session.
-let glueBlobUrl: string | null = null;
-
 function configureEnv(): void {
   if (envConfigured) return;
   env.allowRemoteModels = true;
   env.allowLocalModels = false;
   env.useBrowserCache = true;
-  // ort loads the JS GLUE from wasmPaths.mjs and the .wasm binary from
-  // wasmPaths.wasm. The bundled ort-web fetches the glue EXTERNALLY (it is not
-  // inlined), and the stock glue imports the Node-only 'worker_threads' on load
-  // (two separate Node checks) — which kills init in Obsidian's renderer with
-  // "no available backend found". So we serve our PATCHED glue (gen-ort forced
-  // both Node checks off) from a Blob, and point .wasm at the self-hosted ort/
-  // folder when present else the version-pinned CDN.
+  // ort loads the JS glue from wasmPaths.mjs and the binary from wasmPaths.wasm.
+  // v4 uses the ASYNCIFY single-threaded web build, whose glue carries NO Node /
+  // worker_threads checks (unlike v3's jsep glue), so no patching or Blob is needed.
+  // Point BOTH at the plugin's self-hosted ort/ folder when present (offline, exact-
+  // match build), else the version-pinned CDN. wasmPaths MUST stay an object
+  // {mjs,wasm}: v4 only runs its fetch-into-wasmBinary + renderer-safe load path for
+  // the object form (a bare directory string dead-ends on the worker_threads import).
   const wasmDir = wasmBaseUrl ?? ORT_WEB_CDN;
-  glueBlobUrl ??= URL.createObjectURL(
-    new Blob([ORT_GLUE_JSEP], { type: "text/javascript" }),
-  );
   const wasmPaths = {
-    mjs: glueBlobUrl,
-    wasm: `${wasmDir}ort-wasm-simd-threaded.jsep.wasm`,
+    mjs: `${wasmDir}ort-wasm-simd-threaded.asyncify.mjs`,
+    wasm: `${wasmDir}ort-wasm-simd-threaded.asyncify.wasm`,
   };
   // Set the flags on BOTH shapes so the object ort actually reads is always hit.
   const onnx = env.backends?.onnx as

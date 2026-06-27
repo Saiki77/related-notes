@@ -4,7 +4,7 @@
 // Run BEFORE tsc/eslint/esbuild so the generated import exists on a clean
 // checkout (build/lint/dev all depend on src/ort-version.ts, which is gitignored
 // because it is a build artifact pinned to the installed dependency version).
-import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { createRequire } from "module";
 import { fileURLToPath } from "url";
@@ -44,45 +44,17 @@ const ortVersion = JSON.parse(
   readFileSync(join(ortDir, "package.json"), "utf8"),
 ).version;
 
-// The JSEP build is what transformers v3 uses for BOTH the WebGPU and WASM
-// backends. Ship the wasm-only glue too so a non-jsep path still resolves.
+// transformers.js v4 loads the ASYNCIFY single-threaded web build for the WASM
+// backend (its WebGPU path uses a native execution provider, not these files). Ship
+// the asyncify pair the runtime points wasmPaths at, plus the plain pair as a
+// fallback. Unlike the v3 jsep glue, the asyncify glue carries NO Node/worker_threads
+// checks, so the old patchGlueForWeb step is gone — there is nothing to patch.
 const ORT_WASM_FILES = [
-  "ort-wasm-simd-threaded.jsep.wasm",
-  "ort-wasm-simd-threaded.jsep.mjs",
+  "ort-wasm-simd-threaded.asyncify.wasm",
+  "ort-wasm-simd-threaded.asyncify.mjs",
   "ort-wasm-simd-threaded.wasm",
   "ort-wasm-simd-threaded.mjs",
 ];
-
-// onnxruntime-web's jsep glue has TWO Node checks, each gating a worker_threads
-// import that doesn't resolve in Obsidian's renderer:
-//   1. n = ... && "renderer"!=process.type      -> import("module")+require("worker_threads")
-//   2. typeof globalThis.process?.versions?.node == 'string' (worker bootstrap)
-//                                                 -> (await import('worker_threads'))
-// process.type is read-only in Electron and process.versions.node is always a
-// string there, so we can't flip the environment. Instead we ship a PATCHED copy
-// of the glue with BOTH checks forced false, so it takes the pure-web path (fetch
-// the wasm, instantiate, run single-threaded on the main thread). The plugin
-// serves this patched glue to ort via a Blob URL (wasmPaths.mjs).
-function patchGlueForWeb(ortDir) {
-  let src = readFileSync(
-    join(ortDir, "dist", "ort-wasm-simd-threaded.jsep.mjs"),
-    "utf8",
-  );
-  const patches = [
-    ['"renderer"!=process.type', "!1"],
-    ["typeof globalThis.process?.versions?.node == 'string'", "false"],
-  ];
-  for (const [needle, repl] of patches) {
-    if (!src.includes(needle)) {
-      throw new Error(
-        `gen-ort: glue patch needle not found: ${needle} — the onnxruntime-web ` +
-          "build changed; update patchGlueForWeb in gen-ort.mjs.",
-      );
-    }
-    src = src.split(needle).join(repl);
-  }
-  return src;
-}
 
 export function genOrt() {
   // 1) Write the pinned version + CDN-fallback URL + the web-patched glue source.
@@ -92,10 +64,7 @@ export function genOrt() {
     "// Pinned to the onnxruntime-web version @huggingface/transformers actually\n" +
     "// bundles, so the runtime CDN fallback can never drift from the shipped glue.\n" +
     `export const ORT_WEB_VERSION = ${JSON.stringify(ortVersion)};\n` +
-    `export const ORT_WEB_CDN = ${JSON.stringify(cdn)};\n` +
-    "// The jsep wasm glue with BOTH Node checks forced false (see patchGlueForWeb),\n" +
-    "// served to onnxruntime-web via a Blob URL so it never imports 'worker_threads'.\n" +
-    `export const ORT_GLUE_JSEP = ${JSON.stringify(patchGlueForWeb(ortDir))};\n`;
+    `export const ORT_WEB_CDN = ${JSON.stringify(cdn)};\n`;
   const target = join(here, "src", "ort-version.ts");
   let current = "";
   try {
@@ -105,11 +74,20 @@ export function genOrt() {
   }
   if (current !== contents) writeFileSync(target, contents);
 
-  // 2) Copy the matching wasm assets next to main.js.
+  // 2) Copy the matching wasm assets next to main.js. Clean first so a previous
+  // build's (possibly differently-named) assets never linger in the shipped folder.
   const outDir = join(here, "ort");
+  rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
   for (const f of ORT_WASM_FILES) {
-    copyFileSync(join(ortDir, "dist", f), join(outDir, f));
+    const srcFile = join(ortDir, "dist", f);
+    if (!existsSync(srcFile)) {
+      throw new Error(
+        `gen-ort: expected ORT asset missing: ${f} — the onnxruntime-web build ` +
+          "layout changed; update ORT_WASM_FILES in gen-ort.mjs.",
+      );
+    }
+    copyFileSync(srcFile, join(outDir, f));
   }
 
   return { ortVersion, cdn };
